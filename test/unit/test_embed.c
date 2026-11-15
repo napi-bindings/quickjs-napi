@@ -91,11 +91,14 @@ static void check_errors(napi_env env) {
   EXPECT(info->error_code == napi_ok);
   EXPECT(info->error_message == NULL);
 
-  /* Stubs report themselves by name. */
-  EXPECT(napi_create_array(env, &v) == napi_generic_failure);
+  /* Stubs report themselves by name (napi_get_uv_event_loop stays a stub
+   * until the event loop milestone, M5). */
+  struct uv_loop_s *loop = NULL;
+  EXPECT(napi_get_uv_event_loop(env, &loop) == napi_generic_failure);
   EXPECT(napi_get_last_error_info(env, &info) == napi_ok);
   EXPECT(info->error_code == napi_generic_failure);
-  EXPECT(strstr(info->error_message, "napi_create_array") != NULL);
+  EXPECT(info->error_message != NULL &&
+         strstr(info->error_message, "napi_get_uv_event_loop") != NULL);
 
   /* NULL env never crashes. */
   EXPECT(napi_get_undefined(NULL, &v) == napi_invalid_arg);
@@ -110,9 +113,35 @@ static void check_errors(napi_env env) {
   EXPECT(file != NULL && strcmp(file, "static:test") == 0);
 }
 
+/* More than QN_STACK_ARGS (8) arguments take the heap-allocated path of
+ * napi_call_function / napi_new_instance. */
+static void check_many_args(napi_env env) {
+  napi_value global, math, max, array_ctor, args[12], r;
+  EXPECT(napi_get_global(env, &global) == napi_ok);
+  EXPECT(napi_get_named_property(env, global, "Math", &math) == napi_ok);
+  EXPECT(napi_get_named_property(env, math, "max", &max) == napi_ok);
+  for (int i = 0; i < 12; i++) EXPECT(napi_create_int32(env, i + 1, &args[i]) == napi_ok);
+  EXPECT(napi_call_function(env, math, max, 12, args, &r) == napi_ok);
+  int32_t v = 0;
+  EXPECT(napi_get_value_int32(env, r, &v) == napi_ok && v == 12);
+  /* The result is optional. */
+  EXPECT(napi_call_function(env, math, max, 12, args, NULL) == napi_ok);
+
+  EXPECT(napi_get_named_property(env, global, "Array", &array_ctor) == napi_ok);
+  EXPECT(napi_new_instance(env, array_ctor, 10, args, &r) == napi_ok);
+  uint32_t len = 0;
+  EXPECT(napi_get_array_length(env, r, &len) == napi_ok && len == 10);
+
+  /* Not a function: napi_invalid_arg, no exception (CHECK_TO_FUNCTION). */
+  bool pending = true;
+  EXPECT(napi_call_function(env, global, math, 0, NULL, &r) == napi_invalid_arg);
+  EXPECT(napi_is_exception_pending(env, &pending) == napi_ok && !pending);
+}
+
 static napi_value init(napi_env env, napi_value exports) {
   check_scopes(env);
   check_errors(env);
+  check_many_args(env);
 
   EXPECT(napi_set_instance_data(env, (void *)0x1234, instance_finalizer,
                                 (void *)0x5678) == napi_ok);

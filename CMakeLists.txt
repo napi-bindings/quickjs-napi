@@ -18,6 +18,21 @@ set(QJSNAPI_QUICKJS_LIBRARY
     CACHE FILEPATH
           "Prebuilt libqjs.a, used only when QJSNAPI_QUICKJS_DIR has no sources")
 
+# QuickJS uses GNU C extensions and quickjs-libc relies on MinGW headers:
+# Microsoft Visual C++ (and clang-cl) cannot build it. Fail early with the
+# supported alternatives instead of an error deep inside quickjs.c.
+if(MSVC)
+  message(
+    FATAL_ERROR
+      "QuickJS cannot be compiled with Microsoft Visual C++ (or clang-cl).\n"
+      "On Windows use a MinGW-w64 toolchain with Ninja, for example:\n"
+      "  zig:   cmake -S . -B out -G Ninja "
+      "-DCMAKE_TOOLCHAIN_FILE=../quickjs-build/toolchains/zig.cmake "
+      "-DZIG_TARGET=x86_64-windows-gnu\n"
+      "  MSYS2: from a UCRT64 shell, cmake -S . -B out -G Ninja\n"
+      "Addons built with MSVC (node-gyp) still load: Node-API is a C ABI.")
+endif()
+
 if(QJSNAPI_LIBUV)
   message(FATAL_ERROR "QJSNAPI_LIBUV belongs to milestone M5 and is not "
                       "available yet")
@@ -82,7 +97,9 @@ set(QJSNAPI_SOURCES
     src/error.c
     src/function.c
     src/loader.c
+    src/object.c
     src/scope.c
+    src/string.c
     src/value.c
     src/stubs_generated.c)
 
@@ -129,7 +146,20 @@ else()
 endif()
 set(CMAKE_C_LINK_LIBRARY_USING_QJSNAPI_WHOLE_ARCHIVE_SUPPORTED TRUE)
 
-add_executable(quickjs-napi host/main.c)
+set(QJSNAPI_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_custom_command(
+  OUTPUT "${QJSNAPI_GENERATED_DIR}/bootstrap_js.h"
+  COMMAND
+    "${CMAKE_COMMAND}" -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/host/bootstrap.js
+    -DOUTPUT=${QJSNAPI_GENERATED_DIR}/bootstrap_js.h -DNAME=qn_bootstrap_js -P
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake"
+  DEPENDS host/bootstrap.js cmake/embed.cmake
+  COMMENT "Embedding host/bootstrap.js"
+  VERBATIM)
+
+add_executable(quickjs-napi host/main.c
+                            "${QJSNAPI_GENERATED_DIR}/bootstrap_js.h")
+target_include_directories(quickjs-napi PRIVATE "${QJSNAPI_GENERATED_DIR}")
 set_target_properties(quickjs-napi PROPERTIES C_STANDARD 17 ENABLE_EXPORTS ON)
 target_link_libraries(
   quickjs-napi PRIVATE "$<LINK_LIBRARY:QJSNAPI_WHOLE_ARCHIVE,qjsnapi>")
@@ -173,10 +203,62 @@ if(QJSNAPI_BUILD_TESTS)
   qjsnapi_test_addon(legacy test/addons/loader/legacy.c)
   qjsnapi_test_addon(fnexport test/addons/loader/fnexport.c)
   qjsnapi_test_addon(future test/addons/loader/future.c)
+  qjsnapi_test_addon(values test/addons/values/values.c)
 
   add_test(NAME js_hello
            COMMAND quickjs-napi
                    "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_hello.js"
+                   "${QJSNAPI_ADDON_DIR}")
+
+  # Node.js js-native-api conformance suite (vendored by
+  # tools/sync_node_tests.py). Each test runs from a copy of its directory in
+  # the build tree, so that `require('./build/Release/<addon>')` and
+  # `require('../../common')` resolve exactly as in the Node.js repository.
+  set(QJSNAPI_NODE_TESTS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/node")
+  set(QJSNAPI_NODE_TESTS_BIN "${CMAKE_CURRENT_BINARY_DIR}/node-tests")
+  foreach(_f index.js assert.js)
+    configure_file("${QJSNAPI_NODE_TESTS_SRC}/common/${_f}"
+                   "${QJSNAPI_NODE_TESTS_BIN}/common/${_f}" COPYONLY)
+  endforeach()
+
+  function(qjsnapi_node_test dir)
+    cmake_parse_arguments(T "" "TARGET" "SOURCES;DEFINES;SCRIPTS" ${ARGN})
+    set(_src "${QJSNAPI_NODE_TESTS_SRC}/js-native-api/${dir}")
+    set(_bin "${QJSNAPI_NODE_TESTS_BIN}/js-native-api/${dir}")
+    set(_lib "node_${dir}_${T_TARGET}")
+    list(TRANSFORM T_SOURCES PREPEND "${_src}/")
+    add_library(${_lib} MODULE ${T_SOURCES})
+    set_target_properties(
+      ${_lib}
+      PROPERTIES OUTPUT_NAME "${T_TARGET}"
+                 PREFIX ""
+                 SUFFIX ".node"
+                 C_VISIBILITY_PRESET hidden
+                 LIBRARY_OUTPUT_DIRECTORY "${_bin}/build/Release"
+                 RUNTIME_OUTPUT_DIRECTORY "${_bin}/build/Release")
+    target_include_directories(${_lib} PRIVATE include)
+    target_compile_definitions(
+      ${_lib} PRIVATE BUILDING_NODE_EXTENSION
+                      NODE_GYP_MODULE_NAME=${T_TARGET} ${T_DEFINES})
+    if(WIN32)
+      target_link_libraries(${_lib} PRIVATE quickjs-napi)
+    elseif(APPLE)
+      target_link_options(${_lib} PRIVATE -undefined dynamic_lookup)
+    endif()
+    add_dependencies(quickjs-napi-tests ${_lib})
+    foreach(_script ${T_SCRIPTS})
+      configure_file("${_src}/${_script}" "${_bin}/${_script}" COPYONLY)
+      add_test(NAME node/${dir}/${_script}
+               COMMAND quickjs-napi "${_bin}/${_script}"
+               WORKING_DIRECTORY "${_bin}")
+    endforeach()
+  endfunction()
+
+  include("${QJSNAPI_NODE_TESTS_SRC}/js-native-api/tests.cmake")
+
+  add_test(NAME js_values
+           COMMAND quickjs-napi
+                   "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_values.js"
                    "${QJSNAPI_ADDON_DIR}")
 
   add_executable(test_embed test/unit/test_embed.c)
@@ -189,10 +271,12 @@ if(QJSNAPI_BUILD_TESTS)
   # sanitizers: ASan-instrumented addons cannot be loaded by a regular node.
   find_program(QJSNAPI_NODE node)
   if(QJSNAPI_NODE AND NOT CMAKE_CROSSCOMPILING AND NOT QJSNAPI_SANITIZE)
-    add_test(NAME node_parity_hello
-             COMMAND "${QJSNAPI_NODE}"
-                     "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_hello.js"
-                     "${QJSNAPI_ADDON_DIR}")
+    foreach(_t hello values)
+      add_test(NAME node_parity_${_t}
+               COMMAND "${QJSNAPI_NODE}"
+                       "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_${_t}.js"
+                       "${QJSNAPI_ADDON_DIR}")
+    endforeach()
   endif()
 
   find_package(Python3 COMPONENTS Interpreter)

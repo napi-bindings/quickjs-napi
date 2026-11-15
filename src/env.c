@@ -158,6 +158,50 @@ static JSValue qn_noop(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_UNDEFINED;
 }
 
+/* Every JSValue the host keeps, so that creation failure and destruction
+ * release exactly the same set. */
+static JSValue *host_values(qjsnapi_host *host, size_t *count) {
+  /* Fields are contiguous in qjsnapi_host, from function_proto to
+   * symbol_for (checked below). */
+  *count = (size_t)(&host->symbol_for - &host->function_proto) + 1;
+  return &host->function_proto;
+}
+
+_Static_assert(offsetof(qjsnapi_host, symbol_for) -
+                       offsetof(qjsnapi_host, function_proto) ==
+                   (1 + QN_ERROR_KIND_COUNT + 4) * sizeof(JSValue),
+               "host JSValue fields must be contiguous");
+
+static void host_free_values(qjsnapi_host *host) {
+  size_t n;
+  JSValue *v = host_values(host, &n);
+  for (size_t i = 0; i < n; i++) {
+    JS_FreeValue(host->ctx, v[i]);
+    v[i] = JS_UNDEFINED;
+  }
+}
+
+/* globalThis[name] (or globalThis[name][member]) must be a function. */
+static int capture_builtin(JSContext *ctx, JSValueConst global,
+                           const char *name, const char *member,
+                           JSValue *out) {
+  JSValue v = JS_GetPropertyStr(ctx, global, name);
+  if (!JS_IsException(v) && member) {
+    JSValue m = JS_GetPropertyStr(ctx, v, member);
+    JS_FreeValue(ctx, v);
+    v = m;
+  }
+  if (JS_IsException(v)) return -1;
+  if (!JS_IsFunction(ctx, v)) {
+    JS_FreeValue(ctx, v);
+    JS_ThrowInternalError(ctx, "quickjs-napi: %s%s%s is not available", name,
+                          member ? "." : "", member ? member : "");
+    return -1;
+  }
+  *out = v;
+  return 0;
+}
+
 qjsnapi_host *qjsnapi_host_create(JSContext *ctx) {
   if (JS_GetContextOpaque(ctx) != NULL) {
     JS_ThrowInternalError(ctx,
@@ -172,9 +216,9 @@ qjsnapi_host *qjsnapi_host_create(JSContext *ctx) {
   }
   host->rt = JS_GetRuntime(ctx);
   host->ctx = ctx;
-  host->function_proto = JS_UNDEFINED;
-  for (int i = 0; i < QN_ERROR_KIND_COUNT; i++)
-    host->error_ctors[i] = JS_UNDEFINED;
+  size_t nvalues;
+  JSValue *values = host_values(host, &nvalues);
+  for (size_t i = 0; i < nvalues; i++) values[i] = JS_UNDEFINED;
   qn_list_init(&host->envs);
   qn_list_init(&host->modules);
 
@@ -182,38 +226,36 @@ qjsnapi_host *qjsnapi_host_create(JSContext *ctx) {
    * that replaced globalThis.Function. */
   JSValue probe = JS_NewCFunction(ctx, qn_noop, "", 0);
   if (JS_IsException(probe)) goto fail;
-  host->function_proto = JS_GetPrototype(ctx, probe);
+  JSValue proto = JS_GetPrototype(ctx, probe);
   JS_FreeValue(ctx, probe);
-  if (JS_IsException(host->function_proto)) goto fail;
+  if (JS_IsException(proto)) goto fail;
+  host->function_proto = proto;
 
-  /* Error constructors, captured before any user script runs. Errors built
-   * by calling them carry a stack trace, unlike JS_NewError(). */
-  static const char *const ctor_names[QN_ERROR_KIND_COUNT] = {
+  /* Builtins captured before any user script runs. Errors built by calling
+   * the constructors carry a stack trace, unlike JS_NewError(). */
+  static const char *const error_names[QN_ERROR_KIND_COUNT] = {
       "Error", "TypeError", "RangeError", "SyntaxError"};
   JSValue global = JS_GetGlobalObject(ctx);
-  for (int i = 0; i < QN_ERROR_KIND_COUNT; i++) {
-    host->error_ctors[i] = JS_GetPropertyStr(ctx, global, ctor_names[i]);
-    if (JS_IsException(host->error_ctors[i]) ||
-        !JS_IsConstructor(ctx, host->error_ctors[i])) {
-      JS_FreeValue(ctx, global);
-      if (!JS_HasException(ctx))
-        JS_ThrowInternalError(ctx, "quickjs-napi: %s is not available",
-                              ctor_names[i]);
-      goto fail;
-    }
-  }
+  int r = 0;
+  for (int i = 0; i < QN_ERROR_KIND_COUNT && r == 0; i++)
+    r = capture_builtin(ctx, global, error_names[i], NULL,
+                        &host->error_ctors[i]);
+  if (r == 0) r = capture_builtin(ctx, global, "Object", NULL, &host->object_ctor);
+  if (r == 0)
+    r = capture_builtin(ctx, global, "Object", "freeze", &host->object_freeze);
+  if (r == 0)
+    r = capture_builtin(ctx, global, "Object", "seal", &host->object_seal);
+  if (r == 0) r = capture_builtin(ctx, global, "Symbol", NULL, &host->symbol_ctor);
+  if (r == 0) r = capture_builtin(ctx, global, "Symbol", "for", &host->symbol_for);
   JS_FreeValue(ctx, global);
+  if (r < 0) goto fail;
 
   if (qn_function_class_init(host) < 0) goto fail;
 
   JS_SetContextOpaque(ctx, host);
   return host;
 fail:
-  for (int i = 0; i < QN_ERROR_KIND_COUNT; i++)
-    if (!JS_IsException(host->error_ctors[i]))
-      JS_FreeValue(ctx, host->error_ctors[i]);
-  if (!JS_IsException(host->function_proto))
-    JS_FreeValue(ctx, host->function_proto);
+  host_free_values(host);
   free(host);
   return NULL;
 }
@@ -233,9 +275,7 @@ void qjsnapi_host_destroy(qjsnapi_host *host) {
   while (!qn_list_empty(&host->envs)) {
     qn_env_free(QN_CONTAINER_OF(host->envs.prev, struct napi_env__, link));
   }
-  JS_FreeValue(host->ctx, host->function_proto);
-  for (int i = 0; i < QN_ERROR_KIND_COUNT; i++)
-    JS_FreeValue(host->ctx, host->error_ctors[i]);
+  host_free_values(host);
   if (JS_GetContextOpaque(host->ctx) == host)
     JS_SetContextOpaque(host->ctx, NULL);
   free(host);

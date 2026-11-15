@@ -6,228 +6,13 @@
  * addons referencing them still load; calling one returns
  * napi_generic_failure with a descriptive napi_get_last_error_info().
  *
- * Implemented: 43 / 155 functions.
+ * Implemented: 89 / 155 functions.
  */
 #include "qjsnapi_internal.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_array(napi_env env, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_array");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_array_with_length(napi_env env, size_t length, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_array_with_length");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_string_latin1(napi_env env, const char* str, size_t length, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_string_latin1");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_string_utf16(napi_env env, const char16_t* str, size_t length, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_string_utf16");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-node_api_create_external_string_latin1(napi_env env, char* str, size_t length, node_api_basic_finalize finalize_callback, void* finalize_hint, napi_value* result, bool* copied) {
-  return qn_not_implemented(env, "node_api_create_external_string_latin1");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-node_api_create_external_string_utf16(napi_env env, char16_t* str, size_t length, node_api_basic_finalize finalize_callback, void* finalize_hint, napi_value* result, bool* copied) {
-  return qn_not_implemented(env, "node_api_create_external_string_utf16");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-node_api_create_property_key_latin1(napi_env env, const char* str, size_t length, napi_value* result) {
-  return qn_not_implemented(env, "node_api_create_property_key_latin1");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-node_api_create_property_key_utf8(napi_env env, const char* str, size_t length, napi_value* result) {
-  return qn_not_implemented(env, "node_api_create_property_key_utf8");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-node_api_create_property_key_utf16(napi_env env, const char16_t* str, size_t length, napi_value* result) {
-  return qn_not_implemented(env, "node_api_create_property_key_utf16");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_symbol(napi_env env, napi_value description, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_symbol");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-node_api_symbol_for(napi_env env, const char* utf8description, size_t length, napi_value* result) {
-  return qn_not_implemented(env, "node_api_symbol_for");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_double(napi_env env, napi_value value, double* result) {
-  return qn_not_implemented(env, "napi_get_value_double");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_int32(napi_env env, napi_value value, int32_t* result) {
-  return qn_not_implemented(env, "napi_get_value_int32");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_uint32(napi_env env, napi_value value, uint32_t* result) {
-  return qn_not_implemented(env, "napi_get_value_uint32");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_int64(napi_env env, napi_value value, int64_t* result) {
-  return qn_not_implemented(env, "napi_get_value_int64");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_bool(napi_env env, napi_value value, bool* result) {
-  return qn_not_implemented(env, "napi_get_value_bool");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_string_latin1(napi_env env, napi_value value, char* buf, size_t bufsize, size_t* result) {
-  return qn_not_implemented(env, "napi_get_value_string_latin1");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_string_utf8(napi_env env, napi_value value, char* buf, size_t bufsize, size_t* result) {
-  return qn_not_implemented(env, "napi_get_value_string_utf8");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_string_utf16(napi_env env, napi_value value, char16_t* buf, size_t bufsize, size_t* result) {
-  return qn_not_implemented(env, "napi_get_value_string_utf16");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_coerce_to_bool(napi_env env, napi_value value, napi_value* result) {
-  return qn_not_implemented(env, "napi_coerce_to_bool");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_coerce_to_number(napi_env env, napi_value value, napi_value* result) {
-  return qn_not_implemented(env, "napi_coerce_to_number");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_coerce_to_object(napi_env env, napi_value value, napi_value* result) {
-  return qn_not_implemented(env, "napi_coerce_to_object");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_coerce_to_string(napi_env env, napi_value value, napi_value* result) {
-  return qn_not_implemented(env, "napi_coerce_to_string");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_prototype(napi_env env, napi_value object, napi_value* result) {
-  return qn_not_implemented(env, "napi_get_prototype");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_property_names(napi_env env, napi_value object, napi_value* result) {
-  return qn_not_implemented(env, "napi_get_property_names");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_set_property(napi_env env, napi_value object, napi_value key, napi_value value) {
-  return qn_not_implemented(env, "napi_set_property");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_has_property(napi_env env, napi_value object, napi_value key, bool* result) {
-  return qn_not_implemented(env, "napi_has_property");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_property(napi_env env, napi_value object, napi_value key, napi_value* result) {
-  return qn_not_implemented(env, "napi_get_property");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_delete_property(napi_env env, napi_value object, napi_value key, bool* result) {
-  return qn_not_implemented(env, "napi_delete_property");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_has_own_property(napi_env env, napi_value object, napi_value key, bool* result) {
-  return qn_not_implemented(env, "napi_has_own_property");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_has_named_property(napi_env env, napi_value object, const char* utf8name, bool* result) {
-  return qn_not_implemented(env, "napi_has_named_property");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_set_element(napi_env env, napi_value object, uint32_t index, napi_value value) {
-  return qn_not_implemented(env, "napi_set_element");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_has_element(napi_env env, napi_value object, uint32_t index, bool* result) {
-  return qn_not_implemented(env, "napi_has_element");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_element(napi_env env, napi_value object, uint32_t index, napi_value* result) {
-  return qn_not_implemented(env, "napi_get_element");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_delete_element(napi_env env, napi_value object, uint32_t index, bool* result) {
-  return qn_not_implemented(env, "napi_delete_element");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_define_properties(napi_env env, napi_value object, size_t property_count, const napi_property_descriptor* properties) {
-  return qn_not_implemented(env, "napi_define_properties");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_is_array(napi_env env, napi_value value, bool* result) {
-  return qn_not_implemented(env, "napi_is_array");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_array_length(napi_env env, napi_value value, uint32_t* result) {
-  return qn_not_implemented(env, "napi_get_array_length");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_strict_equals(napi_env env, napi_value lhs, napi_value rhs, bool* result) {
-  return qn_not_implemented(env, "napi_strict_equals");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_call_function(napi_env env, napi_value recv, napi_value func, size_t argc, const napi_value* argv, napi_value* result) {
-  return qn_not_implemented(env, "napi_call_function");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_new_instance(napi_env env, napi_value constructor, size_t argc, const napi_value* argv, napi_value* result) {
-  return qn_not_implemented(env, "napi_new_instance");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_instanceof(napi_env env, napi_value object, napi_value constructor, bool* result) {
-  return qn_not_implemented(env, "napi_instanceof");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_define_class(napi_env env, const char* utf8name, size_t length, napi_callback constructor, void* data, size_t property_count, const napi_property_descriptor* properties, napi_value* result) {
-  return qn_not_implemented(env, "napi_define_class");
-}
 
 NAPI_EXTERN napi_status NAPI_CDECL
 napi_wrap(napi_env env, napi_value js_object, void* native_object, node_api_basic_finalize finalize_cb, void* finalize_hint, napi_ref* result) {
@@ -410,11 +195,6 @@ napi_get_value_bigint_words(napi_env env, napi_value value, int* sign_bit, size_
 }
 
 NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_all_property_names(napi_env env, napi_value object, napi_key_collection_mode key_mode, napi_key_filter key_filter, napi_key_conversion key_conversion, napi_value* result) {
-  return qn_not_implemented(env, "napi_get_all_property_names");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
 napi_detach_arraybuffer(napi_env env, napi_value arraybuffer) {
   return qn_not_implemented(env, "napi_detach_arraybuffer");
 }
@@ -432,16 +212,6 @@ napi_type_tag_object(napi_env env, napi_value value, const napi_type_tag* type_t
 NAPI_EXTERN napi_status NAPI_CDECL
 napi_check_object_type_tag(napi_env env, napi_value value, const napi_type_tag* type_tag, bool* result) {
   return qn_not_implemented(env, "napi_check_object_type_tag");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_object_freeze(napi_env env, napi_value object) {
-  return qn_not_implemented(env, "napi_object_freeze");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_object_seal(napi_env env, napi_value object) {
-  return qn_not_implemented(env, "napi_object_seal");
 }
 
 NAPI_EXTERN napi_status NAPI_CDECL

@@ -3,97 +3,268 @@
  *
  *   quickjs-napi <script.js> [args...]
  *
- * Runs a script with QuickJS (quickjs-libc helpers: console.log, print,
- * scriptArgs) plus:
- *   require(path)  loads a `.node` addon; relative paths are resolved against
- *                  the directory of the main script, like Node.js resolves
- *                  them against the requiring module
- *   gc()           runs the QuickJS cycle collector
+ * Runs the script as a CommonJS module (host/bootstrap.js): `require` loads
+ * .js, .json and Node-API addons (.node), with Node.js resolution rules for
+ * relative paths, directories and node_modules. Globals: `process` (subset),
+ * `global`, `gc()`, plus the quickjs-libc helpers (console.log, print,
+ * scriptArgs).
  *
  * The executable exports every napi_* symbol (see CMakeLists.txt): addons
  * built for Node.js resolve them from this process.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <limits.h>
+#include <unistd.h>
+#endif
+
+#include "bootstrap_js.h" /* generated: qn_bootstrap_js, qn_bootstrap_js_len */
+#include "qjsnapi.h"
 #include "quickjs-libc.h"
 #include "quickjs.h"
-#include "qjsnapi.h"
 
-static char *g_script_dir;
+#ifndef QJS_VERSION_STR
+#define QJS_VERSION_STR "unknown"
+#endif
 
-static int is_path_separator(char c) {
+static int g_exit_requested;
+static int g_exit_code;
+
+/* ------------------------------------------------------------------------ */
+/* File system helpers (UTF-8 paths on every platform)                      */
+/* ------------------------------------------------------------------------ */
+
 #ifdef _WIN32
-  return c == '/' || c == '\\';
+static wchar_t *to_wide(const char *s) {
+  int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+  wchar_t *w = n > 0 ? (wchar_t *)malloc((size_t)n * sizeof(wchar_t)) : NULL;
+  if (w) MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+  return w;
+}
+
+static char *from_wide(const wchar_t *w) {
+  int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+  char *s = n > 0 ? (char *)malloc((size_t)n) : NULL;
+  if (s) WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
+  return s;
+}
+#endif
+
+/* 0: missing, 1: file, 2: directory */
+static int path_kind(const char *path) {
+#ifdef _WIN32
+  wchar_t *w = to_wide(path);
+  if (!w) return 0;
+  DWORD attr = GetFileAttributesW(w);
+  free(w);
+  if (attr == INVALID_FILE_ATTRIBUTES) return 0;
+  return (attr & FILE_ATTRIBUTE_DIRECTORY) ? 2 : 1;
 #else
-  return c == '/';
+  struct stat st;
+  if (stat(path, &st) != 0) return 0;
+  return S_ISDIR(st.st_mode) ? 2 : 1;
 #endif
 }
 
-static int is_absolute(const char *p) {
+static char *real_path(const char *path) {
 #ifdef _WIN32
-  if (p[0] && p[1] == ':') return 1;
+  wchar_t *w = to_wide(path);
+  if (!w) return NULL;
+  wchar_t full[32768];
+  DWORD n = GetFullPathNameW(w, 32768, full, NULL);
+  free(w);
+  if (n == 0 || n >= 32768) return NULL;
+  return from_wide(full);
+#else
+  return realpath(path, NULL);
 #endif
-  return is_path_separator(p[0]);
 }
 
-static char *dir_of(const char *path) {
-  const char *last = NULL;
-  for (const char *p = path; *p; p++)
-    if (is_path_separator(*p)) last = p;
-  if (!last) {
-    char *d = (char *)malloc(2);
-    if (d) strcpy(d, ".");
-    return d;
+static FILE *open_file(const char *path) {
+#ifdef _WIN32
+  wchar_t *w = to_wide(path);
+  FILE *f = w ? _wfopen(w, L"rb") : NULL;
+  free(w);
+  return f;
+#else
+  return fopen(path, "rb");
+#endif
+}
+
+static char *current_dir(void) {
+#ifdef _WIN32
+  wchar_t buf[32768];
+  DWORD n = GetCurrentDirectoryW(32768, buf);
+  return (n == 0 || n >= 32768) ? NULL : from_wide(buf);
+#else
+  char *buf = (char *)malloc(PATH_MAX);
+  if (buf && !getcwd(buf, PATH_MAX)) {
+    free(buf);
+    buf = NULL;
   }
-  size_t n = (size_t)(last - path);
-  if (n == 0) n = 1; /* "/script.js" */
-  char *d = (char *)malloc(n + 1);
-  if (d) {
-    memcpy(d, path, n);
-    d[n] = '\0';
+  return buf;
+#endif
+}
+
+/* ------------------------------------------------------------------------ */
+/* Natives exposed to host/bootstrap.js                                     */
+/* ------------------------------------------------------------------------ */
+
+static const char *arg_string(JSContext *ctx, int argc, JSValueConst *argv,
+                              int i, size_t *len) {
+  if (i >= argc || !JS_IsString(argv[i])) {
+    JS_ThrowTypeError(ctx, "argument %d must be a string", i);
+    return NULL;
   }
-  return d;
+  return JS_ToCStringLen(ctx, len, argv[i]);
 }
 
-static int ends_with(const char *s, const char *suffix) {
-  size_t a = strlen(s), b = strlen(suffix);
-  return a >= b && strcmp(s + a - b, suffix) == 0;
+static JSValue throw_errno(JSContext *ctx, const char *op, const char *path,
+                           int err) {
+  const char *code = err == ENOENT ? "ENOENT" : err == EACCES ? "EACCES" : "EIO";
+  JSValue e = JS_NewError(ctx);
+  if (JS_IsException(e)) return e;
+  char msg[1024];
+  snprintf(msg, sizeof(msg), "%s: %s, %s '%s'", code, strerror(err), op, path);
+  JS_DefinePropertyValueStr(ctx, e, "message", JS_NewString(ctx, msg),
+                            JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+  JS_SetPropertyStr(ctx, e, "code", JS_NewString(ctx, code));
+  JS_SetPropertyStr(ctx, e, "path", JS_NewString(ctx, path));
+  return JS_Throw(ctx, e);
 }
 
-static JSValue js_require(JSContext *ctx, JSValueConst this_val, int argc,
-                          JSValueConst *argv) {
+static JSValue native_stat(JSContext *ctx, JSValueConst this_val, int argc,
+                           JSValueConst *argv) {
   (void)this_val;
-  if (argc < 1 || !JS_IsString(argv[0]))
-    return JS_ThrowTypeError(ctx, "require: the path must be a string");
-  const char *spec = JS_ToCString(ctx, argv[0]);
-  if (!spec) return JS_EXCEPTION;
-  if (!ends_with(spec, ".node")) {
-    JS_ThrowTypeError(ctx,
-                      "require: only Node-API addons (.node) are supported, "
-                      "got '%s'",
-                      spec);
-    JS_FreeCString(ctx, spec);
+  const char *path = arg_string(ctx, argc, argv, 0, NULL);
+  if (!path) return JS_EXCEPTION;
+  int kind = path_kind(path);
+  JS_FreeCString(ctx, path);
+  return JS_NewInt32(ctx, kind);
+}
+
+static JSValue native_realpath(JSContext *ctx, JSValueConst this_val, int argc,
+                               JSValueConst *argv) {
+  (void)this_val;
+  const char *path = arg_string(ctx, argc, argv, 0, NULL);
+  if (!path) return JS_EXCEPTION;
+  char *real = real_path(path);
+  JS_FreeCString(ctx, path);
+  if (!real) return JS_NULL;
+  JSValue r = JS_NewString(ctx, real);
+  free(real);
+  return r;
+}
+
+static JSValue native_read_file(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+  (void)this_val;
+  const char *path = arg_string(ctx, argc, argv, 0, NULL);
+  if (!path) return JS_EXCEPTION;
+  FILE *f = open_file(path);
+  if (!f) {
+    JSValue e = throw_errno(ctx, "open", path, errno);
+    JS_FreeCString(ctx, path);
+    return e;
+  }
+  char *buf = NULL;
+  size_t len = 0, cap = 0;
+  for (;;) {
+    if (len == cap) {
+      cap = cap ? cap * 2 : 65536;
+      char *n = (char *)realloc(buf, cap);
+      if (!n) {
+        free(buf);
+        fclose(f);
+        JS_FreeCString(ctx, path);
+        return JS_ThrowOutOfMemory(ctx);
+      }
+      buf = n;
+    }
+    size_t r = fread(buf + len, 1, cap - len, f);
+    len += r;
+    if (r == 0) break;
+  }
+  int failed = ferror(f);
+  fclose(f);
+  if (failed) {
+    free(buf);
+    JSValue e = throw_errno(ctx, "read", path, EIO);
+    JS_FreeCString(ctx, path);
+    return e;
+  }
+  JS_FreeCString(ctx, path);
+  /* Skip a UTF-8 BOM, as Node.js does for modules. */
+  size_t off = (len >= 3 && (unsigned char)buf[0] == 0xEF &&
+                (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF)
+                   ? 3
+                   : 0;
+  JSValue s = JS_NewStringLen(ctx, buf + off, len - off);
+  free(buf);
+  return s;
+}
+
+static JSValue native_compile(JSContext *ctx, JSValueConst this_val, int argc,
+                              JSValueConst *argv) {
+  (void)this_val;
+  size_t len;
+  const char *src = arg_string(ctx, argc, argv, 0, &len);
+  if (!src) return JS_EXCEPTION;
+  const char *filename = arg_string(ctx, argc, argv, 1, NULL);
+  if (!filename) {
+    JS_FreeCString(ctx, src);
     return JS_EXCEPTION;
   }
-  char *path = NULL;
-  if (!is_absolute(spec) && spec[0] == '.' && g_script_dir) {
-    size_t n = strlen(g_script_dir) + 1 + strlen(spec) + 1;
-    path = (char *)malloc(n);
-    if (path) snprintf(path, n, "%s/%s", g_script_dir, spec);
-  } else {
-    size_t n = strlen(spec) + 1;
-    path = (char *)malloc(n);
-    if (path) memcpy(path, spec, n);
-  }
-  JS_FreeCString(ctx, spec);
-  if (!path) return JS_ThrowOutOfMemory(ctx);
+  JSValue r = JS_Eval(ctx, src, len, filename, JS_EVAL_TYPE_GLOBAL);
+  JS_FreeCString(ctx, filename);
+  JS_FreeCString(ctx, src);
+  return r;
+}
 
+static JSValue native_load_addon(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+  (void)this_val;
+  const char *path = arg_string(ctx, argc, argv, 0, NULL);
+  if (!path) return JS_EXCEPTION;
   JSValue exports;
   int r = qjsnapi_load_addon(qjsnapi_host_from_context(ctx), path, &exports);
-  free(path);
+  JS_FreeCString(ctx, path);
   return r < 0 ? JS_EXCEPTION : exports;
+}
+
+static JSValue native_cwd(JSContext *ctx, JSValueConst this_val, int argc,
+                          JSValueConst *argv) {
+  (void)this_val;
+  (void)argc;
+  (void)argv;
+  char *dir = current_dir();
+  if (!dir) return JS_ThrowInternalError(ctx, "cannot read the current directory");
+  JSValue r = JS_NewString(ctx, dir);
+  free(dir);
+  return r;
+}
+
+/* process.exit(): unwinds the JS stack with an uncatchable exception. */
+static JSValue native_exit(JSContext *ctx, JSValueConst this_val, int argc,
+                           JSValueConst *argv) {
+  (void)this_val;
+  int32_t code = 0;
+  if (argc > 0) JS_ToInt32(ctx, &code, argv[0]);
+  g_exit_requested = 1;
+  g_exit_code = code;
+  JS_ThrowInternalError(ctx, "process.exit(%d)", (int)code);
+  JS_SetUncatchableException(ctx, 1);
+  return JS_EXCEPTION;
 }
 
 static JSValue js_gc(JSContext *ctx, JSValueConst this_val, int argc,
@@ -105,15 +276,126 @@ static JSValue js_gc(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_UNDEFINED;
 }
 
+static const char *platform_name(void) {
+#if defined(_WIN32)
+  return "win32";
+#elif defined(__APPLE__)
+  return "darwin";
+#elif defined(__FreeBSD__)
+  return "freebsd";
+#else
+  return "linux";
+#endif
+}
+
+static int set_fn(JSContext *ctx, JSValueConst obj, const char *name,
+                  JSCFunction *fn, int length) {
+  return JS_SetPropertyStr(ctx, obj, name, JS_NewCFunction(ctx, fn, name, length));
+}
+
+static JSValue make_natives(JSContext *ctx, int argc, char **argv) {
+  JSValue n = JS_NewObject(ctx);
+  if (JS_IsException(n)) return n;
+  set_fn(ctx, n, "stat", native_stat, 1);
+  set_fn(ctx, n, "realpath", native_realpath, 1);
+  set_fn(ctx, n, "readFile", native_read_file, 1);
+  set_fn(ctx, n, "compile", native_compile, 2);
+  set_fn(ctx, n, "loadAddon", native_load_addon, 1);
+  set_fn(ctx, n, "cwd", native_cwd, 0);
+  set_fn(ctx, n, "exit", native_exit, 1);
+  JS_SetPropertyStr(ctx, n, "platform", JS_NewString(ctx, platform_name()));
+  JS_SetPropertyStr(ctx, n, "quickjsVersion", JS_NewString(ctx, QJS_VERSION_STR));
+  JS_SetPropertyStr(ctx, n, "napiVersion",
+                    JS_NewUint32(ctx, qjsnapi_napi_version()));
+
+  /* process.argv = [execPath, absolute script path, args...] */
+  char *exec = real_path(argv[0]);
+  JS_SetPropertyStr(ctx, n, "execPath", JS_NewString(ctx, exec ? exec : argv[0]));
+  JSValue args = JS_NewArray(ctx);
+  JS_SetPropertyUint32(ctx, args, 0, JS_NewString(ctx, exec ? exec : argv[0]));
+  free(exec);
+  char *script = real_path(argv[1]);
+  JS_SetPropertyUint32(ctx, args, 1, JS_NewString(ctx, script ? script : argv[1]));
+  free(script);
+  for (int i = 2; i < argc; i++)
+    JS_SetPropertyUint32(ctx, args, (uint32_t)i, JS_NewString(ctx, argv[i]));
+  JS_SetPropertyStr(ctx, n, "argv", args);
+  if (JS_HasException(ctx)) {
+    JS_FreeValue(ctx, n);
+    return JS_EXCEPTION;
+  }
+  return n;
+}
+
+/* Reports a pending exception unless it is the process.exit() unwinding. */
+static int report_exception(JSContext *ctx) {
+  if (g_exit_requested) {
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return g_exit_code;
+  }
+  js_std_dump_error(ctx);
+  return 1;
+}
+
+static int run(JSContext *ctx, int argc, char **argv) {
+  JSValue boot = JS_Eval(ctx, (const char *)qn_bootstrap_js, qn_bootstrap_js_len,
+                         "quickjs-napi:bootstrap", JS_EVAL_TYPE_GLOBAL);
+  if (JS_IsException(boot)) return report_exception(ctx);
+  JSValue natives = make_natives(ctx, argc, argv);
+  if (JS_IsException(natives)) {
+    JS_FreeValue(ctx, boot);
+    return report_exception(ctx);
+  }
+  JSValue api = JS_Call(ctx, boot, JS_UNDEFINED, 1, &natives);
+  JS_FreeValue(ctx, natives);
+  JS_FreeValue(ctx, boot);
+  if (JS_IsException(api)) return report_exception(ctx);
+
+  int code = 0;
+  JSValue run_main = JS_GetPropertyStr(ctx, api, "runMain");
+  JSValue script = JS_NewString(ctx, argv[1]);
+  JSValue r = JS_Call(ctx, run_main, JS_UNDEFINED, 1, &script);
+  JS_FreeValue(ctx, script);
+  JS_FreeValue(ctx, run_main);
+  if (JS_IsException(r)) {
+    code = report_exception(ctx);
+  } else {
+    JS_FreeValue(ctx, r);
+    js_std_loop(ctx); /* pending jobs and timers */
+  }
+
+  if (!g_exit_requested) {
+    /* process 'exit' listeners, then process.exitCode */
+    JSValue emit_exit = JS_GetPropertyStr(ctx, api, "emitExit");
+    JSValue c = JS_Call(ctx, emit_exit, JS_UNDEFINED, 0, NULL);
+    JS_FreeValue(ctx, emit_exit);
+    if (JS_IsException(c)) {
+      code = report_exception(ctx);
+    } else {
+      int32_t exit_code = 0;
+      JS_ToInt32(ctx, &exit_code, c);
+      JS_FreeValue(ctx, c);
+      if (code == 0) code = exit_code;
+    }
+  } else {
+    code = g_exit_code;
+  }
+  JS_FreeValue(ctx, api);
+  return code;
+}
+
+static JSValue js_gc_fn(JSContext *ctx) {
+  return JS_NewCFunction(ctx, js_gc, "gc", 0);
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     fprintf(stderr,
             "usage: %s <script.js> [args...]\n"
-            "quickjs-napi: Node-API %u for QuickJS\n",
-            argv[0], qjsnapi_napi_version());
+            "quickjs-napi: Node-API %u for QuickJS %s\n",
+            argv[0], qjsnapi_napi_version(), QJS_VERSION_STR);
     return 2;
   }
-  const char *script = argv[1];
 
   JSRuntime *rt = JS_NewRuntime();
   if (!rt) {
@@ -131,42 +413,19 @@ int main(int argc, char **argv) {
   /* scriptArgs = [script, args...], as in the quickjs executable. */
   js_std_add_helpers(ctx, argc - 1, argv + 1);
 
-  int exit_code = 0;
+  int exit_code;
   qjsnapi_host *host = qjsnapi_host_create(ctx);
   if (!host) {
     js_std_dump_error(ctx);
     exit_code = 1;
-    goto done;
-  }
-
-  JSValue global = JS_GetGlobalObject(ctx);
-  JS_SetPropertyStr(ctx, global, "require",
-                    JS_NewCFunction(ctx, js_require, "require", 1));
-  JS_SetPropertyStr(ctx, global, "gc", JS_NewCFunction(ctx, js_gc, "gc", 0));
-  JS_FreeValue(ctx, global);
-
-  g_script_dir = dir_of(script);
-  size_t len;
-  uint8_t *buf = js_load_file(ctx, &len, script);
-  if (!buf) {
-    fprintf(stderr, "quickjs-napi: cannot read '%s'\n", script);
-    exit_code = 1;
   } else {
-    JSValue r =
-        JS_Eval(ctx, (const char *)buf, len, script, JS_EVAL_TYPE_GLOBAL);
-    js_free(ctx, buf);
-    if (JS_IsException(r)) {
-      js_std_dump_error(ctx);
-      exit_code = 1;
-    } else {
-      JS_FreeValue(ctx, r);
-      js_std_loop(ctx); /* pending jobs and timers */
-    }
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "gc", js_gc_fn(ctx));
+    JS_FreeValue(ctx, global);
+    exit_code = run(ctx, argc, argv);
+    qjsnapi_host_destroy(host);
   }
-  qjsnapi_host_destroy(host);
 
-done:
-  free(g_script_dir);
   js_std_free_handlers(rt);
   JS_FreeContext(ctx);
   JS_FreeRuntime(rt);

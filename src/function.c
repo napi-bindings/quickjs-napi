@@ -12,6 +12,7 @@
  * before returning to QuickJS; the result is duplicated out of the scope.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "qjsnapi_internal.h"
@@ -167,7 +168,7 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_create_function(napi_env env,
                                                         napi_callback cb,
                                                         void *data,
                                                         napi_value *result) {
-  CHECK_ENV_NOT_IN_GC(env);
+  NAPI_PREAMBLE(env);
   CHECK_ARG(env, result);
   CHECK_ARG(env, cb);
   if (utf8name != NULL) {
@@ -230,4 +231,147 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_get_new_target(
     *result = h;
   }
   return qn_clear_last_error(env);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Calls                                                                    */
+/* ------------------------------------------------------------------------ */
+
+/* napi_value[] -> JSValueConst[] (the slots already hold references). Uses
+ * `stack` when it is large enough; returns NULL on out-of-memory. */
+#define QN_STACK_ARGS 8
+
+static JSValueConst *args_to_js(size_t argc, const napi_value *argv,
+                                JSValueConst *stack) {
+  JSValueConst *args =
+      argc <= QN_STACK_ARGS ? stack
+                            : (JSValueConst *)malloc(argc * sizeof(JSValue));
+  if (args)
+    for (size_t i = 0; i < argc; i++) args[i] = qn_value(argv[i]);
+  return args;
+}
+
+static void args_free(JSValueConst *args, const JSValueConst *stack) {
+  if (args != stack) free(args);
+}
+
+NAPI_EXTERN napi_status NAPI_CDECL napi_call_function(napi_env env,
+                                                      napi_value recv,
+                                                      napi_value func,
+                                                      size_t argc,
+                                                      const napi_value *argv,
+                                                      napi_value *result) {
+  NAPI_PREAMBLE(env);
+  CHECK_ARG(env, recv);
+  if (argc > 0) CHECK_ARG(env, argv);
+  CHECK_ARG(env, func);
+  JSContext *ctx = env->ctx;
+  JSValue fn = qn_value(func);
+  /* CHECK_TO_FUNCTION in Node.js reports napi_invalid_arg. */
+  RETURN_STATUS_IF_FALSE(env, JS_IsFunction(ctx, fn), napi_invalid_arg);
+  RETURN_STATUS_IF_FALSE(env, argc <= INT32_MAX, napi_invalid_arg);
+
+  JSValueConst stack[QN_STACK_ARGS];
+  JSValueConst *args = args_to_js(argc, argv, stack);
+  RETURN_STATUS_IF_FALSE(env, args != NULL, napi_generic_failure);
+  JSValue r = JS_Call(ctx, fn, qn_value(recv), (int)argc, args);
+  args_free(args, stack);
+  CHECK_JS_STATUS(env, !JS_IsException(r), napi_generic_failure);
+  if (result != NULL) {
+    napi_value h = qn_new_handle(env, r);
+    CHECK_HANDLE(env, h);
+    *result = h;
+  } else {
+    JS_FreeValue(ctx, r);
+  }
+  return qn_clear_last_error(env);
+}
+
+NAPI_EXTERN napi_status NAPI_CDECL napi_new_instance(napi_env env,
+                                                     napi_value constructor,
+                                                     size_t argc,
+                                                     const napi_value *argv,
+                                                     napi_value *result) {
+  NAPI_PREAMBLE(env);
+  CHECK_ARG(env, constructor);
+  if (argc > 0) CHECK_ARG(env, argv);
+  CHECK_ARG(env, result);
+  JSContext *ctx = env->ctx;
+  JSValue ctor = qn_value(constructor);
+  RETURN_STATUS_IF_FALSE(env, JS_IsFunction(ctx, ctor), napi_invalid_arg);
+  RETURN_STATUS_IF_FALSE(env, argc <= INT32_MAX, napi_invalid_arg);
+
+  JSValueConst stack[QN_STACK_ARGS];
+  JSValueConst *args = args_to_js(argc, argv, stack);
+  RETURN_STATUS_IF_FALSE(env, args != NULL, napi_generic_failure);
+  JSValue r = JS_CallConstructor(ctx, ctor, (int)argc, args);
+  args_free(args, stack);
+  RETURN_STATUS_IF_FALSE(env, !JS_IsException(r), napi_pending_exception);
+  napi_value h = qn_new_handle(env, r);
+  CHECK_HANDLE(env, h);
+  *result = h;
+  return GET_RETURN_STATUS(env);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Classes                                                                  */
+/* ------------------------------------------------------------------------ */
+
+/* Equivalent of a V8 FunctionTemplate class: a constructor function whose
+ * `prototype` receives the instance properties, static properties defined
+ * on the constructor itself.
+ *
+ * Known difference: V8 attaches a Signature to prototype methods, so calling
+ * one with a receiver not created by the class throws "Illegal invocation".
+ * Here such a call reaches the native callback, which must validate `this`
+ * (napi_unwrap fails on foreign objects). */
+NAPI_EXTERN napi_status NAPI_CDECL
+napi_define_class(napi_env env, const char *utf8name, size_t length,
+                  napi_callback constructor, void *data,
+                  size_t property_count,
+                  const napi_property_descriptor *properties,
+                  napi_value *result) {
+  NAPI_PREAMBLE(env);
+  CHECK_ARG(env, result);
+  CHECK_ARG(env, constructor);
+  if (property_count > 0) CHECK_ARG(env, properties);
+  /* CHECK_NEW_FROM_UTF8_LEN: the class name is mandatory. */
+  RETURN_STATUS_IF_FALSE(env, length == NAPI_AUTO_LENGTH || length <= INT32_MAX,
+                         napi_invalid_arg);
+  CHECK_ARG(env, utf8name);
+  if (length == NAPI_AUTO_LENGTH) length = strlen(utf8name);
+
+  JSContext *ctx = env->ctx;
+  JSValue ctor = qn_function_new(env, utf8name, length, constructor, data);
+  CHECK_JS(env, !JS_IsException(ctor));
+  /* The handle owns the constructor from here on. */
+  napi_value ctor_h = qn_new_handle(env, ctor);
+  CHECK_HANDLE(env, ctor_h);
+
+  JSValue proto = JS_GetPropertyStr(ctx, ctor, "prototype");
+  CHECK_JS(env, !JS_IsException(proto));
+  size_t static_count = 0;
+  for (size_t i = 0; i < property_count; i++) {
+    const napi_property_descriptor *p = &properties[i];
+    if (p->attributes & napi_static) {
+      static_count++;
+      continue;
+    }
+    napi_status st = qn_define_property(env, proto, p);
+    if (st != napi_ok) {
+      JS_FreeValue(ctx, proto);
+      return st;
+    }
+  }
+  JS_FreeValue(ctx, proto);
+
+  for (size_t i = 0; static_count > 0 && i < property_count; i++) {
+    const napi_property_descriptor *p = &properties[i];
+    if (!(p->attributes & napi_static)) continue;
+    napi_status st = qn_define_property(env, ctor, p);
+    if (st != napi_ok) return st;
+  }
+
+  *result = ctor_h;
+  return GET_RETURN_STATUS(env);
 }

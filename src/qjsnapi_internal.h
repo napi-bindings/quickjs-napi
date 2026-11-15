@@ -127,6 +127,13 @@ struct qjsnapi_host {
   JSContext *ctx;
   JSValue function_proto; /* %Function.prototype%, captured at init */
   JSValue error_ctors[QN_ERROR_KIND_COUNT]; /* captured at init */
+  /* Builtins used by APIs without a QuickJS C equivalent, captured before
+   * any user script runs (immune to later monkey-patching). */
+  JSValue object_ctor;   /* Object: ToObject for primitives */
+  JSValue object_freeze; /* Object.freeze */
+  JSValue object_seal;   /* Object.seal */
+  JSValue symbol_ctor;   /* Symbol */
+  JSValue symbol_for;    /* Symbol.for */
   qn_list envs;           /* napi_env__.link, in creation order */
   qn_list modules;        /* qn_module_record.link */
   bool destroying;
@@ -237,6 +244,17 @@ QN_INTERNAL void qn_check_gc_access(napi_env env);
     }                                                                   \
   } while (0)
 
+/* Like Node's RETURN_STATUS_IF_FALSE_WITH_PREAMBLE: a failure caused by a JS
+ * exception reports napi_pending_exception, anything else `status`. */
+#define CHECK_JS_STATUS(env, cond, status)                              \
+  do {                                                                  \
+    if (!(cond)) {                                                      \
+      return qn_set_last_error((env), JS_HasException((env)->ctx)       \
+                                          ? napi_pending_exception      \
+                                          : (status));                  \
+    }                                                                   \
+  } while (0)
+
 /* A handle allocation failed: QuickJS out of memory. */
 #define CHECK_HANDLE(env, h) \
   RETURN_STATUS_IF_FALSE((env), ((h) != NULL), napi_generic_failure)
@@ -277,6 +295,31 @@ QN_INTERNAL void qn_env_teardown(napi_env env);
 QN_INTERNAL void qn_env_free(napi_env env);
 
 QN_INTERNAL void qn_modules_free(qjsnapi_host *host);
+
+/* ToObject: new reference, or JS_EXCEPTION with a TypeError pending for
+ * null/undefined (V8 semantics of Value::ToObject). */
+QN_INTERNAL JSValue qn_to_object(napi_env env, JSValueConst v);
+
+/* Defines one napi_property_descriptor on `obj`. Shared by
+ * napi_define_properties and napi_define_class. */
+QN_INTERNAL napi_status qn_define_property(napi_env env, JSValueConst obj,
+                                           const napi_property_descriptor *p);
+
+/* UTF-8 string from (str, length) with the NAPI_AUTO_LENGTH convention;
+ * the caller has validated the arguments. */
+QN_INTERNAL JSValue qn_new_string_utf8(JSContext *ctx, const char *str,
+                                       size_t length);
+
+/* Validation shared by every string-creating API (CHECK_NEW_STRING_ARGS). */
+#define CHECK_NEW_STRING_ARGS(env, str, length, result)                    \
+  do {                                                                     \
+    CHECK_ENV_NOT_IN_GC(env);                                              \
+    if ((length) > 0) CHECK_ARG((env), (str));                             \
+    CHECK_ARG((env), (result));                                            \
+    RETURN_STATUS_IF_FALSE(                                                \
+        (env), ((length) == NAPI_AUTO_LENGTH) || (length) <= INT32_MAX,    \
+        napi_invalid_arg);                                                 \
+  } while (0)
 
 /* Error used when an API exists in the headers but is not implemented yet
  * (generated stubs). Sets the last error to napi_generic_failure. */
