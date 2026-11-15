@@ -1,0 +1,62 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": "ON" }
+    },
+    {
+      "name": "zig-windows",
+      "hidden": true,
+      "inherits": "base",
+      "toolchainFile": "${sourceDir}/../quickjs-build/toolchains/zig.cmake",
+      "cacheVariables": { "ZIG_TARGET": "x86_64-windows-gnu" }
+    },
+    {
+      "name": "windows-zig-debug",
+      "displayName": "Windows x64 - zig - Debug",
+      "inherits": "zig-windows",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "windows-zig-release",
+      "displayName": "Windows x64 - zig - Release",
+      "inherits": "zig-windows",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "unix-debug",
+      "displayName": "Linux/macOS - Debug",
+      "inherits": "base",
+      "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "unix-asan",
+      "displayName": "Linux/macOS - Debug + ASan/UBSan",
+      "inherits": "unix-debug",
+      "cacheVariables": { "QJSNAPI_SANITIZE": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-zig-debug", "configurePreset": "windows-zig-debug" },
+    { "name": "windows-zig-release", "configurePreset": "windows-zig-release" },
+    { "name": "unix-debug", "configurePreset": "unix-debug" },
+    { "name": "unix-asan", "configurePreset": "unix-asan" }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": { "outputOnFailure": true }
+    },
+    { "name": "windows-zig-debug", "inherits": "test-base", "configurePreset": "windows-zig-debug" },
+    { "name": "windows-zig-release", "inherits": "test-base", "configurePreset": "windows-zig-release" },
+    { "name": "unix-debug", "inherits": "test-base", "configurePreset": "unix-debug" },
+    { "name": "unix-asan", "inherits": "test-base", "configurePreset": "unix-asan" }
+  ]
+}

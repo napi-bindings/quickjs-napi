@@ -14,9 +14,9 @@ others exist as generated stubs that return `napi_generic_failure` with a
 ## Build
 
 ```sh
-cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build out
-ctest --test-dir out --output-on-failure
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 Options:
@@ -38,13 +38,22 @@ QuickJS does not support Microsoft Visual C++: the Visual Studio generators
 (and clang-cl) are rejected at configure time. Use a MinGW-w64 toolchain with
 Ninja, as quickjs-build does:
 
-- **zig** (version in `../quickjs-build/.zigversion`, e.g. `winget install zig.zig`):
+- **zig** (version in `../quickjs-build/.zigversion`, e.g. `winget install zig.zig`;
+  `zig` must be in `PATH`, or set the `ZIG` environment variable). Use the
+  presets in `CMakePresets.json`, which pass the toolchain file:
 
   ```sh
-  cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=../quickjs-build/toolchains/zig.cmake -DZIG_TARGET=x86_64-windows-gnu
-  cmake --build out
-  ctest --test-dir out --output-on-failure
+  cmake --preset windows-zig-debug
+  cmake --build --preset windows-zig-debug
+  ctest --preset windows-zig-debug
   ```
+
+  In VS Code (CMake Tools) select the configure preset *Windows x64 - zig -
+  Debug*. Do not use a "zig" compiler **kit**: a kit sets `CMAKE_AR=zig;ar`
+  without the toolchain file, and Ninja then runs the literal command `zig;ar`
+  (`error: unknown command: ;ar`). The presets build in `build/<preset>`; if
+  `build/` still holds a tree configured with a kit or a Visual Studio
+  generator (`build/CMakeCache.txt`), delete it once before the first configure.
 
 - **MSYS2**: from a UCRT64 shell (`pacman -S mingw-w64-ucrt-x86_64-{gcc,cmake,ninja}`),
   the generic commands above.
