@@ -1,5 +1,7 @@
 # quickjs-napi
 
+[![CI](https://github.com/napi-bindings/quickjs-napi/actions/workflows/ci.yml/badge.svg?branch=napi)](https://github.com/napi-bindings/quickjs-napi/actions/workflows/ci.yml)
+
 Node-API implementation for QuickJS (2026-06-04, from `../quickjs-build`).
 Addons built for Node.js (node-gyp, node-addon-api, napi-rs) are loaded
 unchanged: they resolve `napi_*` from the `quickjs-napi` executable.
@@ -13,11 +15,36 @@ others exist as generated stubs that return `napi_generic_failure` with a
 
 ## Build
 
+`quickjs-build` must be checked out next to this repository
+(`../quickjs-build`, branch `feat/quickjs-2026-06-04`). The presets in
+`CMakePresets.json` are the reference configurations, used by CI too; each
+builds in `build/<preset>`:
+
+| Preset | |
+|---|---|
+| `unix-debug` | Linux/macOS, Debug (QuickJS leak assertion at `JS_FreeRuntime`) |
+| `unix-release` | Linux/macOS, Release |
+| `unix-asan` | Linux/macOS, Debug + ASan/UBSan, QuickJS included |
+| `windows-zig-debug`, `windows-zig-release` | Windows x64 with `zig cc` (see below) |
+
+```sh
+cmake --preset unix-debug
+cmake --build --preset unix-debug
+ctest --preset unix-debug
+```
+
+Without presets:
+
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+CI (`.github/workflows/ci.yml`) runs gcc Debug/Release, clang, gcc with
+ASan/UBSan and macOS arm64 with the `unix-*` presets, and Windows x64 with
+the `windows-zig-*` presets; the Linux and macOS jobs also run the
+`node_parity_*` tests under Node.js 22.
 
 Options:
 

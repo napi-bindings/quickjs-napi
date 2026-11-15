@@ -26,10 +26,10 @@ if(MSVC)
     FATAL_ERROR
       "QuickJS cannot be compiled with Microsoft Visual C++ (or clang-cl).\n"
       "On Windows use a MinGW-w64 toolchain with Ninja, for example:\n"
-      "  zig:   cmake -S . -B out -G Ninja "
+      "  zig:   cmake -S . -B build -G Ninja "
       "-DCMAKE_TOOLCHAIN_FILE=../quickjs-build/toolchains/zig.cmake "
       "-DZIG_TARGET=x86_64-windows-gnu\n"
-      "  MSYS2: from a UCRT64 shell, cmake -S . -B out -G Ninja\n"
+      "  MSYS2: from a UCRT64 shell, cmake -S . -B build -G Ninja\n"
       "Addons built with MSVC (node-gyp) still load: Node-API is a C ABI.")
 endif()
 
