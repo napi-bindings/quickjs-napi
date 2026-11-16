@@ -6,63 +6,13 @@
  * addons referencing them still load; calling one returns
  * napi_generic_failure with a descriptive napi_get_last_error_info().
  *
- * Implemented: 89 / 155 functions.
+ * Implemented: 104 / 155 functions.
  */
 #include "qjsnapi_internal.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_wrap(napi_env env, napi_value js_object, void* native_object, node_api_basic_finalize finalize_cb, void* finalize_hint, napi_ref* result) {
-  return qn_not_implemented(env, "napi_wrap");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_unwrap(napi_env env, napi_value js_object, void** result) {
-  return qn_not_implemented(env, "napi_unwrap");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_remove_wrap(napi_env env, napi_value js_object, void** result) {
-  return qn_not_implemented(env, "napi_remove_wrap");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_external(napi_env env, void* data, node_api_basic_finalize finalize_cb, void* finalize_hint, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_external");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_external(napi_env env, napi_value value, void** result) {
-  return qn_not_implemented(env, "napi_get_value_external");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_reference(napi_env env, napi_value value, uint32_t initial_refcount, napi_ref* result) {
-  return qn_not_implemented(env, "napi_create_reference");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_delete_reference(node_api_basic_env env, napi_ref ref) {
-  return qn_not_implemented(env, "napi_delete_reference");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_reference_ref(napi_env env, napi_ref ref, uint32_t* result) {
-  return qn_not_implemented(env, "napi_reference_ref");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_reference_unref(napi_env env, napi_ref ref, uint32_t* result) {
-  return qn_not_implemented(env, "napi_reference_unref");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_reference_value(napi_env env, napi_ref ref, napi_value* result) {
-  return qn_not_implemented(env, "napi_get_reference_value");
-}
 
 NAPI_EXTERN napi_status NAPI_CDECL
 napi_is_arraybuffer(napi_env env, napi_value value, bool* result) {
@@ -135,16 +85,6 @@ napi_is_promise(napi_env env, napi_value value, bool* is_promise) {
 }
 
 NAPI_EXTERN napi_status NAPI_CDECL
-napi_run_script(napi_env env, napi_value script, napi_value* result) {
-  return qn_not_implemented(env, "napi_run_script");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_adjust_external_memory(node_api_basic_env env, int64_t change_in_bytes, int64_t* adjusted_value) {
-  return qn_not_implemented(env, "napi_adjust_external_memory");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
 napi_create_date(napi_env env, double time, napi_value* result) {
   return qn_not_implemented(env, "napi_create_date");
 }
@@ -157,11 +97,6 @@ napi_is_date(napi_env env, napi_value value, bool* is_date) {
 NAPI_EXTERN napi_status NAPI_CDECL
 napi_get_date_value(napi_env env, napi_value value, double* result) {
   return qn_not_implemented(env, "napi_get_date_value");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_add_finalizer(napi_env env, napi_value js_object, void* finalize_data, node_api_basic_finalize finalize_cb, void* finalize_hint, napi_ref* result) {
-  return qn_not_implemented(env, "napi_add_finalizer");
 }
 
 NAPI_EXTERN napi_status NAPI_CDECL
@@ -202,16 +137,6 @@ napi_detach_arraybuffer(napi_env env, napi_value arraybuffer) {
 NAPI_EXTERN napi_status NAPI_CDECL
 napi_is_detached_arraybuffer(napi_env env, napi_value value, bool* result) {
   return qn_not_implemented(env, "napi_is_detached_arraybuffer");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_type_tag_object(napi_env env, napi_value value, const napi_type_tag* type_tag) {
-  return qn_not_implemented(env, "napi_type_tag_object");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_check_object_type_tag(napi_env env, napi_value value, const napi_type_tag* type_tag, bool* result) {
-  return qn_not_implemented(env, "napi_check_object_type_tag");
 }
 
 NAPI_EXTERN napi_status NAPI_CDECL

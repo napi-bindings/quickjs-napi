@@ -1,7 +1,8 @@
 /*
  * Embedding test: drives Node-API directly through a statically linked addon
  * (qjsnapi_init_static_addon) and checks behaviour that a JS test cannot
- * observe: teardown order, handle-scope misuse, stubs, error state.
+ * observe: teardown order, handle-scope misuse, stubs, error state, and the
+ * finalizer queue of the embedding API (qjsnapi_host_run_finalizers).
  *
  * Built against a Debug QuickJS: JS_FreeRuntime asserts that every object
  * was released, so any leaked JSValue aborts this test.
@@ -16,6 +17,9 @@
 
 static int failures;
 static char teardown_log[256];
+static qjsnapi_host *g_host;
+static JSRuntime *g_rt;
+static int external_finalized;
 
 #define EXPECT(cond)                                               \
   do {                                                             \
@@ -38,6 +42,63 @@ static void instance_finalizer(napi_env env, void *data, void *hint) {
   EXPECT(data == (void *)0x1234);
   EXPECT(hint == (void *)0x5678);
   log_event("I");
+}
+
+static void external_finalizer(napi_env env, void *data, void *hint) {
+  (void)env;
+  (void)hint;
+  EXPECT(data == (void *)0xE1);
+  external_finalized++;
+}
+
+/* Runs at teardown: JavaScript is disabled (module API version 10). */
+static void wrap_finalizer(napi_env env, void *data, void *hint) {
+  (void)hint;
+  EXPECT(data == (void *)0xA1);
+  napi_value global, v;
+  EXPECT(napi_get_global(env, &global) == napi_ok);
+  EXPECT(napi_get_named_property(env, global, "Object", &v) ==
+         napi_cannot_run_js);
+  log_event("W");
+}
+
+/* Queued finalizers: not run by the GC, run by qjsnapi_host_run_finalizers. */
+static void check_lifetime(napi_env env, napi_value exports) {
+  napi_handle_scope scope;
+  EXPECT(napi_open_handle_scope(env, &scope) == napi_ok);
+  napi_value ext;
+  EXPECT(napi_create_external(env, (void *)0xE1, external_finalizer, NULL,
+                              &ext) == napi_ok);
+  napi_valuetype t;
+  EXPECT(napi_typeof(env, ext, &t) == napi_ok && t == napi_external);
+  napi_ref weak;
+  EXPECT(napi_create_reference(env, ext, 0, &weak) == napi_ok);
+  EXPECT(napi_close_handle_scope(env, scope) == napi_ok);
+
+  /* The external is dead: the weak reference sees it at once ... */
+  napi_value v = (napi_value)(void *)0x1;
+  EXPECT(napi_get_reference_value(env, weak, &v) == napi_ok && v == NULL);
+  EXPECT(napi_delete_reference(env, weak) == napi_ok);
+  /* ... but its finalizer only runs from the event loop, after a GC. */
+  EXPECT(external_finalized == 0);
+  JS_RunGC(g_rt);
+  EXPECT(external_finalized == 0);
+  EXPECT(qjsnapi_host_has_pending_finalizers(g_host));
+  EXPECT(qjsnapi_host_run_finalizers(g_host) == 1);
+  EXPECT(external_finalized == 1);
+  EXPECT(!qjsnapi_host_has_pending_finalizers(g_host));
+
+  /* A wrapped object still alive at teardown: finalized then, before the
+   * (older) instance data. */
+  napi_value obj;
+  EXPECT(napi_create_object(env, &obj) == napi_ok);
+  EXPECT(napi_wrap(env, obj, (void *)0xA1, wrap_finalizer, NULL, NULL) ==
+         napi_ok);
+  void *native = NULL;
+  EXPECT(napi_unwrap(env, obj, &native) == napi_ok && native == (void *)0xA1);
+  EXPECT(napi_wrap(env, obj, (void *)0xA2, wrap_finalizer, NULL, NULL) ==
+         napi_invalid_arg);
+  EXPECT(napi_set_named_property(env, exports, "wrapped", obj) == napi_ok);
 }
 
 static void check_scopes(napi_env env) {
@@ -158,6 +219,7 @@ static napi_value init(napi_env env, napi_value exports) {
   EXPECT(napi_create_string_utf8(env, "static", NAPI_AUTO_LENGTH, &s) ==
          napi_ok);
   EXPECT(napi_set_named_property(env, exports, "kind", s) == napi_ok);
+  check_lifetime(env, exports);
   return exports;
 }
 
@@ -165,6 +227,8 @@ int main(void) {
   JSRuntime *rt = JS_NewRuntime();
   JSContext *ctx = JS_NewContext(rt);
   qjsnapi_host *host = qjsnapi_host_create(ctx);
+  g_rt = rt;
+  g_host = host;
   EXPECT(host != NULL);
   EXPECT(qjsnapi_host_from_context(ctx) == host);
   EXPECT(qjsnapi_host_create(ctx) == NULL); /* opaque already in use */
@@ -188,8 +252,9 @@ int main(void) {
   JS_FreeValue(ctx, exports);
 
   qjsnapi_host_destroy(host);
-  /* Cleanup hooks LIFO, removed hook skipped, then instance data. */
-  EXPECT(strcmp(teardown_log, "BAI") == 0);
+  /* Cleanup hooks LIFO, removed hook skipped, then the references with a
+   * finalizer, newest first: the wrap, then the instance data. */
+  EXPECT(strcmp(teardown_log, "BAWI") == 0);
   EXPECT(JS_GetContextOpaque(ctx) == NULL);
 
   JS_FreeContext(ctx);

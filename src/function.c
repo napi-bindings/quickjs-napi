@@ -66,6 +66,8 @@ static JSValue qn_function_call(JSContext *ctx, JSValueConst func_obj,
   info.argv = argv;
   info.data = f->data;
 
+  /* Node: CallIntoModule clears the last error before every callback. */
+  qn_clear_last_error(env);
   napi_value result = f->cb(env, &info);
 
   JSValue ret;
@@ -373,5 +375,32 @@ napi_define_class(napi_env env, const char *utf8name, size_t length,
   }
 
   *result = ctor_h;
+  return GET_RETURN_STATUS(env);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Scripts                                                                  */
+/* ------------------------------------------------------------------------ */
+
+/* Like v8::Script::Compile + Run in the current context. As in Node.js a
+ * compile or run failure reports napi_generic_failure, the exception stays
+ * pending. */
+NAPI_EXTERN napi_status NAPI_CDECL napi_run_script(napi_env env,
+                                                   napi_value script,
+                                                   napi_value *result) {
+  NAPI_PREAMBLE(env);
+  CHECK_ARG(env, script);
+  CHECK_ARG(env, result);
+  JSContext *ctx = env->ctx;
+  JSValue src = qn_value(script);
+  RETURN_STATUS_IF_FALSE(env, JS_IsString(src), napi_string_expected);
+  size_t len;
+  const char *code = JS_ToCStringLen(ctx, &len, src);
+  RETURN_STATUS_IF_FALSE(env, code != NULL, napi_generic_failure);
+  JSValue v = JS_Eval(ctx, code, len, "<anonymous>", JS_EVAL_TYPE_GLOBAL);
+  JS_FreeCString(ctx, code);
+  RETURN_STATUS_IF_FALSE(env, !JS_IsException(v), napi_generic_failure);
+  *result = qn_new_handle(env, v);
+  CHECK_HANDLE(env, *result);
   return GET_RETURN_STATUS(env);
 }

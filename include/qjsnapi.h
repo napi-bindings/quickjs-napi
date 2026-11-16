@@ -60,6 +60,31 @@ int qjsnapi_init_static_addon(qjsnapi_host *host, const char *name,
 /* Highest Node-API version supported by this build. */
 uint32_t qjsnapi_napi_version(void);
 
+/* ---- Finalizers -----------------------------------------------------------
+ *
+ * As in Node.js, the finalizers of objects collected by the garbage collector
+ * (napi_wrap, napi_add_finalizer, napi_create_external) are not run inside
+ * the GC: they are queued and run later, at a point where JavaScript may run
+ * (Node.js uses a SetImmediate callback). The embedder's event loop calls
+ * qjsnapi_host_run_finalizers() once per iteration, outside of any JS call.
+ * Finalizers still queued when the host is destroyed run then, with
+ * JavaScript disabled (napi_cannot_run_js). */
+
+/* Runs the queued finalizers of every env. Returns how many ran. */
+size_t qjsnapi_host_run_finalizers(qjsnapi_host *host);
+
+/* Non-zero when finalizers are queued: the event loop must not exit yet. */
+int qjsnapi_host_has_pending_finalizers(qjsnapi_host *host);
+
+/* Called with an exception that no JavaScript frame can catch: thrown by a
+ * finalizer. Node.js triggers process 'uncaughtException' (or exits). The
+ * handler takes ownership of `exception`. Without a handler the exception is
+ * printed on stderr and dropped. */
+typedef void (*qjsnapi_uncaught_fn)(qjsnapi_host *host, JSContext *ctx,
+                                    JSValue exception, void *opaque);
+void qjsnapi_host_set_uncaught_handler(qjsnapi_host *host,
+                                       qjsnapi_uncaught_fn fn, void *opaque);
+
 #ifdef __cplusplus
 }
 #endif

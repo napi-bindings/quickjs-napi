@@ -261,6 +261,7 @@ static int run_init(qjsnapi_host *host, const char *key, void *handle,
     return -1;
   }
 
+  qn_clear_last_error(env); /* Node: CallIntoModule */
   napi_value returned = init(env, exports_h);
 
   if (JS_HasException(ctx)) {
