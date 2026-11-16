@@ -1,0 +1,7 @@
+# LF in every checkout, Windows included. include/quickjs.h and
+# include/quickjs-libc.h must stay byte-identical to the ones in quickjs-build
+# (CMake compares their SHA-256), and quickjs-build stores them with LF.
+* text=auto eol=lf
+
+*.node binary
+*.pdf binary
