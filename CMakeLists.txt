@@ -72,6 +72,16 @@ if(EXISTS "${QJSNAPI_QUICKJS_DIR}/CMakeLists.txt")
   set(QJS_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
   set(QJS_BUILD_LIBC ON CACHE BOOL "" FORCE)
   add_subdirectory("${QJSNAPI_QUICKJS_DIR}" quickjs EXCLUDE_FROM_ALL)
+  # QuickJS's cutils.h falls back to `#define offsetof(t, f) ((size_t)
+  # &((t *)0)->f)` when <stddef.h> was not included before it. With glibc
+  # some earlier header always pulls it in; with the MinGW-w64 headers none
+  # does, so container_of() becomes a member access through a null pointer:
+  # undefined behaviour that `zig cc` traps at the first JS_NewRuntime() in
+  # Debug builds (UBSan is on by default without -O). The sources are kept
+  # unmodified, so force the compiler's offsetof in instead.
+  if(WIN32 AND NOT MSVC)
+    target_compile_options(qjs PRIVATE "SHELL:-include stddef.h")
+  endif()
 elseif(QJSNAPI_QUICKJS_LIBRARY)
   add_library(qjs STATIC IMPORTED)
   set_target_properties(qjs PROPERTIES IMPORTED_LOCATION
