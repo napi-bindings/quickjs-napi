@@ -223,7 +223,14 @@
     exitCode: undefined,
     cwd: () => natives.cwd(),
     nextTick(fn, ...args) {
-      Promise.resolve().then(() => fn(...args));
+      checkCallback(fn);
+      Promise.resolve().then(() => {
+        try {
+          fn(...args);
+        } catch (e) {
+          fatalException(e);
+        }
+      });
     },
     on(event, fn) {
       (listeners[event] || (listeners[event] = [])).push(fn);
@@ -264,6 +271,195 @@
   globalThis.process = process;
   globalThis.global = globalThis;
 
+  // -------------------------------------------------------------- console
+  // quickjs-libc only provides console.log.
+  function formatArgs(args) {
+    return args.map((a) => (typeof a === 'string' ? a : String(a))).join(' ');
+  }
+  if (typeof console === 'object') {
+    if (!console.error) {
+      console.error = (...args) => natives.writeStderr(formatArgs(args) + '\n');
+    }
+    if (!console.warn) console.warn = console.error;
+    if (!console.info) console.info = console.log;
+  }
+
+  // ----------------------------------------------------- uncaught errors
+  function formatError(err) {
+    if (err !== null && typeof err === 'object' && typeof err.stack === 'string') {
+      // QuickJS stacks omit the "Name: message" line that V8 prints first.
+      return `${String(err)}\n${err.stack}`;
+    }
+    return `Uncaught ${String(err)}`;
+  }
+
+  // Called by the host for an exception no JavaScript frame can catch:
+  // a throwing timer or microtask, a Node-API finalizer, the main module.
+  function fatalException(err) {
+    if (process.listeners('uncaughtException').length > 0) {
+      process.emit('uncaughtException', err, 'uncaughtException');
+      return;
+    }
+    natives.writeStderr(formatError(err) + '\n');
+    process.exit(1);
+  }
+
+  // Node.js default (--unhandled-rejections=throw).
+  function unhandledRejection(reason, promise) {
+    if (!process.emit('unhandledRejection', reason, promise)) {
+      fatalException(reason);
+    }
+  }
+
+  // --------------------------------------------------------------- timers
+  // Run by the host loop one callback at a time (runTimers), so that
+  // microtasks and Node-API finalizers run between callbacks as in Node.js.
+  const timers = [];
+  const immediates = [];
+  let nextTimerId = 1;
+
+  function checkCallback(fn) {
+    if (typeof fn !== 'function') {
+      const e = new TypeError(
+        'The "callback" argument must be of type function. Received ' +
+        (fn === null ? 'null' : typeof fn));
+      e.code = 'ERR_INVALID_ARG_TYPE';
+      throw e;
+    }
+  }
+
+  class Timeout {
+    constructor(fn, args, ms, repeat) {
+      this._id = nextTimerId++;
+      this._fn = fn;
+      this._args = args;
+      this._ms = ms;
+      this._repeat = repeat;
+      this._due = Date.now() + ms;
+      this._active = true;
+      this._ref = true;
+    }
+    ref() { this._ref = true; return this; }
+    unref() { this._ref = false; return this; }
+    hasRef() { return this._ref; }
+    refresh() { this._due = Date.now() + this._ms; return this; }
+    close() { clearTimeout(this); return this; }
+    [Symbol.toPrimitive]() { return this._id; }
+  }
+
+  class Immediate {
+    constructor(fn, args) {
+      this._fn = fn;
+      this._args = args;
+      this._active = true;
+      this._ref = true;
+    }
+    ref() { this._ref = true; return this; }
+    unref() { this._ref = false; return this; }
+    hasRef() { return this._ref; }
+  }
+
+  function delay(ms) {
+    ms = Number(ms);
+    return ms >= 1 && ms <= 2147483647 ? Math.trunc(ms) : 1;
+  }
+
+  function setTimeout(fn, ms, ...args) {
+    checkCallback(fn);
+    const t = new Timeout(fn, args, delay(ms), false);
+    timers.push(t);
+    return t;
+  }
+  function setInterval(fn, ms, ...args) {
+    checkCallback(fn);
+    const t = new Timeout(fn, args, delay(ms), true);
+    timers.push(t);
+    return t;
+  }
+  function clearTimeout(t) {
+    const timer = typeof t === 'object' && t !== null ? t :
+      timers.find((x) => x._id === Number(t));
+    if (timer instanceof Timeout && timer._active) {
+      timer._active = false;
+      const i = timers.indexOf(timer);
+      if (i >= 0) timers.splice(i, 1);
+    }
+  }
+  function setImmediate(fn, ...args) {
+    checkCallback(fn);
+    const i = new Immediate(fn, args);
+    immediates.push(i);
+    return i;
+  }
+  function clearImmediate(i) {
+    if (i instanceof Immediate) i._active = false;
+  }
+  function queueMicrotask(fn) {
+    checkCallback(fn);
+    Promise.resolve().then(() => {
+      try {
+        fn();
+      } catch (e) {
+        fatalException(e);
+      }
+    });
+  }
+
+  function invoke(task) {
+    try {
+      task._fn(...task._args);
+    } catch (e) {
+      fatalException(e);
+    }
+  }
+
+  // Runs one due timer, else one immediate, and returns 0; otherwise returns
+  // the delay in ms until the next referenced timer, or -1 when none is left.
+  function runTimers() {
+    const now = Date.now();
+    let next = null;
+    for (const t of timers) {
+      if (t._due <= now && (next === null || t._due < next._due)) next = t;
+    }
+    if (next !== null) {
+      if (next._repeat) {
+        next._due = now + next._ms;
+      } else {
+        next._active = false;
+        timers.splice(timers.indexOf(next), 1);
+      }
+      invoke(next);
+      return 0;
+    }
+    while (immediates.length > 0) {
+      const i = immediates.shift();
+      if (i._active) {
+        i._active = false;
+        invoke(i);
+        return 0;
+      }
+    }
+    let wait = -1;
+    for (const t of timers) {
+      if (t._ref && (wait < 0 || t._due - now < wait)) wait = Math.max(t._due - now, 1);
+    }
+    return wait;
+  }
+
+  Object.assign(globalThis, {
+    setTimeout, setInterval, clearTimeout, clearInterval: clearTimeout,
+    setImmediate, clearImmediate, queueMicrotask,
+  });
+  builtins.timers = {
+    setTimeout, setInterval, clearTimeout, clearInterval: clearTimeout,
+    setImmediate, clearImmediate,
+  };
+  builtins['timers/promises'] = {
+    setTimeout: (ms, value) => new Promise((resolve) => setTimeout(resolve, ms, value)),
+    setImmediate: (value) => new Promise((resolve) => setImmediate(resolve, value)),
+  };
+  builtins.module.builtinModules.push('timers', 'timers/promises');
+
   function runMain(path) {
     const real = tryFile(resolvePath(natives.cwd(), path));
     if (!real) throw notFound(path, null);
@@ -274,5 +470,5 @@
     mainModule.loaded = true;
   }
 
-  return { runMain, emitExit };
+  return { runMain, emitExit, runTimers, fatalException, unhandledRejection };
 })

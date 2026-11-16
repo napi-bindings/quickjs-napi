@@ -134,9 +134,63 @@ struct qjsnapi_host {
   JSValue object_seal;   /* Object.seal */
   JSValue symbol_ctor;   /* Symbol */
   JSValue symbol_for;    /* Symbol.for */
+  /* Weak references (lifetime.c). QuickJS has no C API for them: the JS
+   * builtins are used, captured here before any user script runs. */
+  JSValue weakref_ctor;  /* WeakRef */
+  JSValue weakref_deref; /* WeakRef.prototype.deref */
+  JSValue weakmap_get;   /* WeakMap.prototype.get */
+  JSValue weakmap_set;   /* WeakMap.prototype.set */
+  JSValue holders;       /* WeakMap: target -> NapiHolder object */
   qn_list envs;           /* napi_env__.link, in creation order */
   qn_list modules;        /* qn_module_record.link */
+  int64_t external_memory; /* napi_adjust_external_memory counter */
+  qjsnapi_uncaught_fn uncaught_fn;
+  void *uncaught_opaque;
   bool destroying;
+};
+
+/* Per-target side record of the lifetime machinery, stored as the opaque of
+ * a NapiHolder object kept in host->holders (a WeakMap keyed by the target).
+ * When the target dies, the next JS_RunGC drops the WeakMap entry, the
+ * holder object is freed and its class finalizer notifies every reference
+ * still registered on it: this is the equivalent of V8's weak callback. */
+typedef struct qn_holder {
+  qn_list refs;  /* napi_ref__.holder_link */
+  napi_ref wrap; /* reference created by napi_wrap, or NULL */
+  bool has_tag;
+  napi_type_tag tag;
+} qn_holder;
+
+/* napi_ref, and every other tracked finalizer (instance data). Mirrors
+ * v8impl::Reference / ReferenceWithFinalizer / TrackedFinalizer.
+ *
+ *   count > 0           value holds a strong reference
+ *   count == 0, weak    weak holds a WeakRef to the target (objects,
+ *                       functions, non-registered symbols)
+ *   count == 0, !weak   the value is released for good (`empty`)
+ *
+ * Registered symbols (Symbol.for) cannot be held weakly by QuickJS; they
+ * are never collected anyway, so they stay strong (`keep_strong`), which is
+ * what Node.js observably does. */
+struct napi_ref__ {
+  qn_list link;        /* env->reflist or env->finalizing_reflist */
+  qn_list holder_link; /* holder->refs while holder != NULL */
+  qn_list queue_link;  /* env->pending_finalizers while queued */
+  napi_env env;
+  qn_holder *holder;
+  JSValue value;
+  JSValue weak;
+  uint32_t count;
+  bool can_be_weak;
+  bool keep_strong;
+  bool empty;         /* the value is gone (Node: persistent reset) */
+  bool runtime_owned; /* deleted after Finalize (ReferenceOwnership::kRuntime) */
+  bool finalizing;    /* in finalizing_reflist: has a finalizer slot */
+  bool tracker;       /* TrackedFinalizer: no JS value at all */
+  bool queued;
+  napi_finalize finalize_cb;
+  void *data; /* finalize data, also the wrapped native object */
+  void *hint;
 };
 
 struct napi_env__ {
@@ -154,10 +208,16 @@ struct napi_env__ {
   qn_scope *root_scope;
   uint32_t open_handle_scopes; /* user-visible scopes, root excluded */
   char *module_filename;       /* file:// URL, or NULL */
-  void *instance_data;
-  napi_finalize instance_data_finalize_cb;
-  void *instance_data_finalize_hint;
+  napi_ref instance_data;      /* tracker in finalizing_reflist, or NULL */
   qn_list cleanup_hooks; /* qn_cleanup_hook.link, executed LIFO */
+  /* References. Those with a finalizer slot are finalized first at
+   * teardown, since their finalizers may delete the plain ones. */
+  qn_list reflist;
+  qn_list finalizing_reflist;
+  /* Finalizers of collected targets, run at a point where JavaScript may
+   * run (qjsnapi_host_run_finalizers), never from inside the GC. */
+  qn_list pending_finalizers;
+  bool destructing;
 };
 
 /* Native data of a function created through Node-API. */
@@ -320,6 +380,19 @@ QN_INTERNAL JSValue qn_new_string_utf8(JSContext *ctx, const char *str,
         (env), ((length) == NAPI_AUTO_LENGTH) || (length) <= INT32_MAX,    \
         napi_invalid_arg);                                                 \
   } while (0)
+
+/* lifetime.c: classes, captured builtins and the holders WeakMap. */
+QN_INTERNAL int qn_lifetime_init(qjsnapi_host *host);
+QN_INTERNAL bool qn_is_external(JSValueConst v);
+/* Teardown of the references of an env (Node: DrainFinalizerQueue, then
+ * FinalizeAll(finalizing_reflist), then FinalizeAll(reflist)). */
+QN_INTERNAL void qn_env_finalize_refs(napi_env env);
+/* Runs a Node-API finalizer inside its own handle scope. An exception it
+ * leaves pending is reported as uncaught (or dropped during teardown). */
+QN_INTERNAL void qn_call_finalizer(napi_env env, napi_finalize cb, void *data,
+                                   void *hint);
+/* Reports an uncaught exception (ownership of `exc` is taken). */
+QN_INTERNAL void qn_report_uncaught(qjsnapi_host *host, JSValue exc);
 
 /* Error used when an API exists in the headers but is not implemented yet
  * (generated stubs). Sets the last error to napi_generic_failure. */

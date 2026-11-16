@@ -6,10 +6,12 @@
  *   for every env, newest first:
  *     1. can_call_into_js = false
  *     2. env cleanup hooks, LIFO
- *     3. instance data finalizer
+ *     3. queued finalizers, then every reference with a finalizer slot
+ *        (instance data included), then every plain reference, newest
+ *        first (lifetime.c, qn_env_finalize_refs)
  *   module cache released (exports objects)
  *   every env arena released (all napi_value slots)
- *   %Function.prototype% reference released, host detached from the context
+ *   captured builtins released, host detached from the context
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,6 +102,9 @@ napi_env qn_env_new(qjsnapi_host *host, int32_t module_api_version,
                                 : QN_DEFAULT_MODULE_API_VERSION;
   env->can_call_into_js = true;
   qn_list_init(&env->cleanup_hooks);
+  qn_list_init(&env->reflist);
+  qn_list_init(&env->finalizing_reflist);
+  qn_list_init(&env->pending_finalizers);
   if (module_filename_url) {
     env->module_filename = qn_strdup(module_filename_url);
     if (!env->module_filename) goto fail;
@@ -130,12 +135,7 @@ void qn_env_teardown(napi_env env) {
     free(h);
     fun(arg);
   }
-  if (env->instance_data_finalize_cb) {
-    napi_finalize cb = env->instance_data_finalize_cb;
-    env->instance_data_finalize_cb = NULL;
-    cb(env, env->instance_data, env->instance_data_finalize_hint);
-  }
-  env->instance_data = NULL;
+  qn_env_finalize_refs(env);
 }
 
 void qn_env_free(napi_env env) {
@@ -162,14 +162,14 @@ static JSValue qn_noop(JSContext *ctx, JSValueConst this_val, int argc,
  * release exactly the same set. */
 static JSValue *host_values(qjsnapi_host *host, size_t *count) {
   /* Fields are contiguous in qjsnapi_host, from function_proto to
-   * symbol_for (checked below). */
-  *count = (size_t)(&host->symbol_for - &host->function_proto) + 1;
+   * holders (checked below). */
+  *count = (size_t)(&host->holders - &host->function_proto) + 1;
   return &host->function_proto;
 }
 
-_Static_assert(offsetof(qjsnapi_host, symbol_for) -
+_Static_assert(offsetof(qjsnapi_host, holders) -
                        offsetof(qjsnapi_host, function_proto) ==
-                   (1 + QN_ERROR_KIND_COUNT + 4) * sizeof(JSValue),
+                   (1 + QN_ERROR_KIND_COUNT + 9) * sizeof(JSValue),
                "host JSValue fields must be contiguous");
 
 static void host_free_values(qjsnapi_host *host) {
@@ -251,6 +251,7 @@ qjsnapi_host *qjsnapi_host_create(JSContext *ctx) {
   if (r < 0) goto fail;
 
   if (qn_function_class_init(host) < 0) goto fail;
+  if (qn_lifetime_init(host) < 0) goto fail;
 
   JS_SetContextOpaque(ctx, host);
   return host;
@@ -317,25 +318,6 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_get_node_version(
   CHECK_ENV(env);
   CHECK_ARG(env, version);
   *version = &node_version;
-  return qn_clear_last_error(env);
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_set_instance_data(node_api_basic_env env, void *data,
-                       napi_finalize finalize_cb, void *finalize_hint) {
-  CHECK_ENV(env);
-  /* As in Node.js, previous data is replaced without being finalized. */
-  env->instance_data = data;
-  env->instance_data_finalize_cb = finalize_cb;
-  env->instance_data_finalize_hint = finalize_hint;
-  return qn_clear_last_error(env);
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_instance_data(node_api_basic_env env, void **data) {
-  CHECK_ENV(env);
-  CHECK_ARG(env, data);
-  *data = env->instance_data;
   return qn_clear_last_error(env);
 }
 

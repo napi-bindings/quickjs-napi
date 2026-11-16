@@ -6,12 +6,31 @@ Node-API implementation for QuickJS (2026-06-04, from `../quickjs-build`).
 Addons built for Node.js (node-gyp, node-addon-api, napi-rs) are loaded
 unchanged: they resolve `napi_*` from the `quickjs-napi` executable.
 
-Status: milestone **M1** (values, strings, objects, properties, functions,
-classes, errors). 89 of 155 Node-API functions are implemented and pass 14
-tests of the Node.js `js-native-api` suite (see `test/node/README.md`); the
-others exist as generated stubs that return `napi_generic_failure` with a
-"not implemented yet" message, so that every addon still loads. See
+Status: milestone **M2** (M1 values, strings, objects, properties,
+functions, classes, errors; M2 references, externals, wrapping, finalizers,
+type tags, instance data, `napi_run_script`). 104 of 155 Node-API functions
+are implemented and pass 25 tests of the Node.js `js-native-api` suite (see
+`test/node/README.md`); the others exist as generated stubs that return
+`napi_generic_failure` with a "not implemented yet" message, so that every
+addon still loads. `NAPI_EXPERIMENTAL` APIs are not provided. See
 `PIANO-IMPLEMENTAZIONE.md` in the project for the plan.
+
+## Lifetime model
+
+- `napi_ref` follows `v8impl::Reference`: strong while its count is > 0; at
+  count 0 an object, function or local symbol is held through a JS `WeakRef`
+  (QuickJS reports the target dead as soon as its refcount drops to zero),
+  other values are released.
+- QuickJS has no weak callback in its C API. Each target of a reference, a
+  wrap or a type tag gets a *holder* object in a `WeakMap` keyed by the
+  target; QuickJS drops the entry of a dead key during `JS_RunGC`, and the
+  holder's class finalizer plays the role of V8's weak callback. Wrapping
+  therefore works on any object (frozen objects, proxies, functions) without
+  adding properties.
+- Finalizers never run inside the GC: as in Node.js they are queued and run
+  from the event loop (`qjsnapi_host_run_finalizers`), or at teardown with
+  JavaScript disabled (`napi_cannot_run_js`). `global.gc()` runs two GC
+  passes, because QuickJS collects cycles after dropping weak entries.
 
 ## Build
 
@@ -32,6 +51,11 @@ cmake --preset unix-debug
 cmake --build --preset unix-debug
 ctest --preset unix-debug
 ```
+
+With Clang (`zig cc` included), Debug builds compile the QuickJS library
+itself with `-O1`: at `-O0` its interpreter loop needs ~64 KiB of C stack per
+JS call and QuickJS's 1 MiB stack limit would stop at ~16 nested calls. Our
+own code keeps the Debug flags, and QuickJS keeps its assertions.
 
 Without presets:
 
@@ -99,32 +123,42 @@ The script runs as a CommonJS module (`host/bootstrap.js`): `require`
 loads `.js`, `.json` and `.node` files with Node.js resolution rules
 (relative paths, directories with `package.json` "main" or `index.*`,
 `node_modules`). Globals: a subset of `process` (`argv`, `platform`,
-`exitCode`, `exit`, `on('exit')`, `nextTick`, `cwd`), `global`, `gc()`, and
-the quickjs-libc helpers (`console.log`, `print`, `scriptArgs`). ES modules
-and package `exports` maps are not supported yet.
+`exitCode`, `exit`, `on`/`emit` for `exit`, `uncaughtException` and
+`unhandledRejection`, `nextTick`, `cwd`), `global`, `gc()`, timers
+(`setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`; builtin
+modules `timers` and `timers/promises`), and the quickjs-libc helpers
+(`console.log`, `print`, `scriptArgs`). As in Node.js, an exception no
+frame catches (a timer, a microtask, a Node-API finalizer) goes to
+`process.on('uncaughtException')` or ends the process with exit code 1, and
+an unhandled promise rejection is treated the same way. ES modules and
+package `exports` maps are not supported yet.
 
 Embedding: see `include/qjsnapi.h`
 (`qjsnapi_host_create`, `qjsnapi_load_addon`, `qjsnapi_init_static_addon`,
-`qjsnapi_host_destroy`).
+`qjsnapi_host_destroy`). An embedder's event loop calls
+`qjsnapi_host_run_finalizers` once per iteration and installs
+`qjsnapi_host_set_uncaught_handler` for exceptions thrown by finalizers.
 
 ## Layout
 
 | Path | |
 |---|---|
 | `include/` | Node-API headers (v10), QuickJS headers, `qjsnapi.h` |
-| `src/env.c` | host and env lifecycle, last error, instance data, cleanup hooks |
+| `src/env.c` | host and env lifecycle, last error, cleanup hooks |
+| `src/lifetime.c` | references, externals, wrap, finalizers and their queue, type tags, instance data |
 | `src/scope.c` | handle-scope arena (`napi_value` = pointer to an owned `JSValue` slot) |
-| `src/function.c` | functions with `new.target` support (class with a `call` hook), calls, `napi_define_class` |
+| `src/function.c` | functions with `new.target` support (class with a `call` hook), calls, `napi_define_class`, `napi_run_script` |
 | `src/value.c` | primitives, numbers, coercion, arrays, strict equality |
 | `src/string.c` | strings (latin1/UTF-8/UTF-16, lossless through WTF-8/CESU-8), property keys, symbols |
 | `src/object.c` | properties, `napi_define_properties`, property names, prototype, freeze/seal, `instanceof` |
 | `src/error.c` | errors and exceptions |
 | `src/loader.c` | `.node` loading: `napi_register_module_v1`, API version, legacy `napi_module_register` |
 | `src/stubs_generated.c` | generated by `tools/gen_stubs.py`, do not edit |
-| `host/main.c`, `host/bootstrap.js` | the `quickjs-napi` executable and its CommonJS loader (embedded at build time by `cmake/embed.cmake`) |
+| `host/main.c`, `host/bootstrap.js` | the `quickjs-napi` executable: event loop, CommonJS loader, timers, `process` (embedded at build time by `cmake/embed.cmake`) |
 | `test/addons`, `test/js` | our test addons; the JS tests also run under Node.js as reference |
 | `test/node` | Node.js conformance tests (vendored, see its README) |
-| `test/unit` | C embedding test (teardown order, scopes, error state) |
+| `test/unit` | C embedding test (teardown order, scopes, error state, finalizer queue) |
+| `test/lsan.supp` | LeakSanitizer suppressions for leaks the Node.js tests make by design |
 
 After implementing a function, run `python3 tools/gen_stubs.py` to drop its
 stub; the `stubs_up_to_date` test fails otherwise.

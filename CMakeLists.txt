@@ -82,6 +82,15 @@ if(EXISTS "${QJSNAPI_QUICKJS_DIR}/CMakeLists.txt")
   if(WIN32 AND NOT MSVC)
     target_compile_options(qjs PRIVATE "SHELL:-include stddef.h")
   endif()
+  # The interpreter loop (JS_CallInternal) is one huge function. At -O0
+  # Clang, `zig cc` included, gives each of its locals a separate stack slot:
+  # one JS call then takes ~64 KiB of C stack and the default 1 MiB QuickJS
+  # stack limit allows ~16 nested calls. -O1 brings a frame back to a few
+  # KiB; assertions (the leak check of JS_FreeRuntime) stay enabled. Our own
+  # code keeps the Debug flags.
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(qjs PRIVATE $<$<CONFIG:Debug>:-O1>)
+  endif()
 elseif(QJSNAPI_QUICKJS_LIBRARY)
   add_library(qjs STATIC IMPORTED)
   set_target_properties(qjs PROPERTIES IMPORTED_LOCATION
@@ -106,6 +115,7 @@ set(QJSNAPI_SOURCES
     src/env.c
     src/error.c
     src/function.c
+    src/lifetime.c
     src/loader.c
     src/object.c
     src/scope.c
@@ -182,6 +192,16 @@ endif()
 # Tests
 # ------------------------------------------------------------------------------
 if(QJSNAPI_BUILD_TESTS)
+  # Some Node.js tests are C++ (6_object_wrap, 7_factory_wrap, ...). The zig
+  # toolchain of quickjs-build only defines the C compiler: use `zig c++`
+  # with the same target.
+  if(DEFINED ZIG AND DEFINED ZIG_TARGET AND NOT CMAKE_CXX_COMPILER)
+    set(CMAKE_CXX_COMPILER "${ZIG}" c++)
+    set(CMAKE_CXX_COMPILER_TARGET "${ZIG_TARGET}")
+    set(CMAKE_CXX_FLAGS_RELEASE_INIT "-g0")
+    set(CMAKE_CXX_FLAGS_MINSIZEREL_INIT "-g0")
+  endif()
+  enable_language(CXX)
   enable_testing()
   set(QJSNAPI_ADDON_DIR "${CMAKE_CURRENT_BINARY_DIR}/addons")
   add_custom_target(quickjs-napi-tests ALL)
@@ -226,7 +246,7 @@ if(QJSNAPI_BUILD_TESTS)
   # `require('../../common')` resolve exactly as in the Node.js repository.
   set(QJSNAPI_NODE_TESTS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/node")
   set(QJSNAPI_NODE_TESTS_BIN "${CMAKE_CURRENT_BINARY_DIR}/node-tests")
-  foreach(_f index.js assert.js)
+  foreach(_f index.js assert.js gc.js require-as-module.js)
     configure_file("${QJSNAPI_NODE_TESTS_SRC}/common/${_f}"
                    "${QJSNAPI_NODE_TESTS_BIN}/common/${_f}" COPYONLY)
   endforeach()
@@ -244,6 +264,8 @@ if(QJSNAPI_BUILD_TESTS)
                  PREFIX ""
                  SUFFIX ".node"
                  C_VISIBILITY_PRESET hidden
+                 CXX_VISIBILITY_PRESET hidden
+                 CXX_STANDARD 17
                  LIBRARY_OUTPUT_DIRECTORY "${_bin}/build/Release"
                  RUNTIME_OUTPUT_DIRECTORY "${_bin}/build/Release")
     target_include_directories(${_lib} PRIVATE include)
@@ -262,6 +284,31 @@ if(QJSNAPI_BUILD_TESTS)
                COMMAND quickjs-napi "${_bin}/${_script}"
                WORKING_DIRECTORY "${_bin}")
     endforeach()
+  endfunction()
+
+  # A script that Node.js runs from a child process of itself (spawnSync):
+  # the child mode runs directly, the output is checked by regex. REQUIRE
+  # loads the script with require(), as the parent does.
+  function(qjsnapi_node_child_run dir script)
+    cmake_parse_arguments(T "REQUIRE" "" "ARGS;PASS;FAIL" ${ARGN})
+    set(_bin "${QJSNAPI_NODE_TESTS_BIN}/js-native-api/${dir}")
+    configure_file("${QJSNAPI_NODE_TESTS_SRC}/js-native-api/${dir}/${script}"
+                   "${_bin}/${script}" COPYONLY)
+    if(T_REQUIRE)
+      set(_cmd quickjs-napi
+               "${QJSNAPI_NODE_TESTS_BIN}/common/require-as-module.js"
+               "${_bin}/${script}" ${T_ARGS})
+    else()
+      set(_cmd quickjs-napi "${_bin}/${script}" ${T_ARGS})
+    endif()
+    add_test(NAME node/${dir}/${script} COMMAND ${_cmd}
+             WORKING_DIRECTORY "${_bin}")
+    set_tests_properties(node/${dir}/${script} PROPERTIES
+                         PASS_REGULAR_EXPRESSION "${T_PASS}")
+    if(T_FAIL)
+      set_tests_properties(node/${dir}/${script} PROPERTIES
+                           FAIL_REGULAR_EXPRESSION "${T_FAIL}")
+    endif()
   endfunction()
 
   include("${QJSNAPI_NODE_TESTS_SRC}/js-native-api/tests.cmake")
@@ -298,5 +345,12 @@ if(QJSNAPI_BUILD_TESTS)
              COMMAND Python3::Interpreter
                      "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_exports.py"
                      $<TARGET_FILE:quickjs-napi>)
+  endif()
+
+  # Leaks the vendored Node.js tests make by design (see the file).
+  if(QJSNAPI_SANITIZE)
+    get_property(_tests DIRECTORY PROPERTY TESTS)
+    set_property(TEST ${_tests} APPEND PROPERTY ENVIRONMENT
+                 "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/test/lsan.supp:print_suppressions=0")
   endif()
 endif()

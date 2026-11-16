@@ -10,6 +10,14 @@ from each binding.gyp, so the build needs neither Python nor node-gyp.
 
 To enable more tests as milestones land, add their directory names to TESTS
 and run the script again.
+
+Every *.js file of a test directory is a test script, as in Node.js. Two
+kinds of exceptions are declared below, each with its reason:
+  SKIP_TARGETS / SKIP_SCRIPTS  not built / not run;
+  CHILD_RUNS                   scripts that re-run themselves through
+                               child_process (not available in quickjs-napi):
+                               CTest runs the child mode directly and checks
+                               its output with regular expressions.
 """
 
 import ast
@@ -37,7 +45,56 @@ TESTS = [
     "test_properties",
     "test_string",
     "test_symbol",
+    # M2
+    "6_object_wrap",
+    "7_factory_wrap",
+    "8_passing_wrapped",
+    "test_cannot_run_js",
+    "test_exception",
+    "test_function",
+    "test_general",
+    "test_instance_data",
+    "test_object",
+    "test_reference",
+    "test_reference_double_free",
 ]
+
+# Targets not built, with the reason.
+SKIP_TARGETS = {
+    ("6_object_wrap", "myobject_basic_finalizer"):
+        "NAPI_EXPERIMENTAL: the project headers do not declare the "
+        "experimental APIs",
+}
+
+# Scripts not run, with the reason.
+SKIP_SCRIPTS = {
+    "6_object_wrap/test-basic-finalizer.js":
+        "needs myobject_basic_finalizer (NAPI_EXPERIMENTAL)",
+}
+
+# Scripts that spawn their own child process. `args` are passed to the
+# script (process.argv[2]...); with `require` the script is loaded through
+# require() instead (module !== require.main), as the Node.js parent does.
+# `pass` must match the output; `fail` must not.
+CHILD_RUNS = {
+    "test_exception/testFinalizerException.js": {
+        "args": ["child"],
+        "pass": "Error during Finalize",
+    },
+    "test_general/testEnvCleanup.js": {
+        "args": ["child"],
+        "pass": "(for simple wrap.*for second wrap|for second wrap.*for simple wrap)",
+        "fail": "for wrap, removeWrap|for first wrap",
+    },
+    "test_instance_data/test.js": {
+        "require": True,
+        "pass": "deleting addon data",
+        "fail": "Mismatched|Error",
+    },
+}
+
+# Files of Node.js test/common copied verbatim next to our shim.
+COMMON_FILES = ["gc.js"]
 
 SHARED_FILES = ["common.h", "common-inl.h", "entry_point.h"]
 
@@ -69,6 +126,35 @@ PATCHES = [
      "/^TypeError: (?:Cannot set property .* of #<Object> which has only a "
      "getter|no setter for property)$/",
      "engine message: QuickJS words the getter-only TypeError differently"),
+    ("6_object_wrap/test.js",
+     "/^TypeError: Cannot set property .* of #<.*> which has only a getter$/",
+     "/^TypeError: (?:Cannot set property .* of #<.*> which has only a "
+     "getter|no setter for property)$/",
+     "engine message: QuickJS words the getter-only TypeError differently"),
+    ("test_object/test.js",
+     "/Cannot add property w, object is not extensible/",
+     "/Cannot add property w, object is not extensible|"
+     "^TypeError: object is not extensible$/",
+     "engine message: QuickJS words the non-extensible TypeError differently"),
+    ("test_object/test.js",
+     "/Cannot delete property 'x' of #<Object>/",
+     "/Cannot delete property 'x' of #<Object>|"
+     "^TypeError: could not delete property$/",
+     "engine message: QuickJS words the non-configurable TypeError "
+     "differently"),
+    ("test_object/test.js",
+     "/Cannot assign to read only property 'x' of object '#<Object>/",
+     "/Cannot assign to read only property 'x' of object '#<Object>|"
+     "^TypeError: 'x' is read-only$/",
+     "engine message: QuickJS words the read-only TypeError differently"),
+    ("test_object/test_object.c",
+     "                                           \"Invalid type index\"));             \\\n"
+     "    }                                                                          \\\n",
+     "                                           \"Invalid type index\"));             \\\n"
+     "      return NULL;                                                             \\\n"
+     "    }                                                                          \\\n",
+     "test bug: after throwing, the macro went on reading type_tags[index] "
+     "out of bounds (undefined behaviour, trapped by UBSan)"),
     ("test_string/test_string.c",
      "  // We do not want the string to be copied.\n"
      "  if (copied) {\n"
@@ -109,6 +195,10 @@ def main(argv):
     os.makedirs(DEST)
     for name in SHARED_FILES:
         shutil.copy2(os.path.join(src_root, name), os.path.join(DEST, name))
+    common_dst = os.path.join(os.path.dirname(DEST), "common")
+    for name in COMMON_FILES:
+        shutil.copy2(os.path.join(argv[0], "test", "common", name),
+                     os.path.join(common_dst, name))
     # Only the Node.js license itself (the tests are Node.js code); the rest
     # of the file covers bundled dependencies that are not vendored here.
     with open(os.path.join(argv[0], "LICENSE"), encoding="utf-8") as f:
@@ -125,6 +215,8 @@ def main(argv):
         % NODE_TAG,
         "# qjsnapi_node_test(<dir> TARGET <name> SOURCES ... DEFINES ...",
         "#                   SCRIPTS ...)",
+        "# qjsnapi_node_child_run(<dir> <script> [REQUIRE] ARGS ... PASS <regex>",
+        "#                        [FAIL <regex>])",
         "",
     ]
     for test in TESTS:
@@ -132,9 +224,13 @@ def main(argv):
         dst = os.path.join(DEST, test)
         shutil.copytree(src, dst)
         gyp = read_gyp(os.path.join(src, "binding.gyp"))
-        scripts = sorted(f for f in os.listdir(src)
-                         if f.startswith("test") and f.endswith(".js"))
+        all_scripts = sorted(f for f in os.listdir(src) if f.endswith(".js"))
+        scripts = [f for f in all_scripts
+                   if "%s/%s" % (test, f) not in SKIP_SCRIPTS
+                   and "%s/%s" % (test, f) not in CHILD_RUNS]
         for target in gyp["targets"]:
+            if (test, target["target_name"]) in SKIP_TARGETS:
+                continue
             sources = [s for s in target.get("sources", [])
                        if s.endswith((".c", ".cc", ".cpp"))]
             lines.append("qjsnapi_node_test(%s" % test)
@@ -145,6 +241,19 @@ def main(argv):
             lines.append("  SCRIPTS %s)" % cmake_list(scripts))
             # Scripts are registered once, with the first target.
             scripts = []
+        for f in all_scripts:
+            run = CHILD_RUNS.get("%s/%s" % (test, f))
+            if not run:
+                continue
+            line = "qjsnapi_node_child_run(%s %s" % (test, f)
+            if run.get("require"):
+                line += " REQUIRE"
+            if run.get("args"):
+                line += " ARGS %s" % cmake_list(run["args"])
+            line += " PASS %s" % cmake_list([run["pass"]])
+            if run.get("fail"):
+                line += " FAIL %s" % cmake_list([run["fail"]])
+            lines.append(line + ")")
         lines.append("")
 
     with open(os.path.join(DEST, "tests.cmake"), "w", encoding="utf-8",

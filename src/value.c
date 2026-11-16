@@ -203,8 +203,7 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_typeof(napi_env env, napi_value value,
   } else if (JS_IsFunction(ctx, v)) {
     *result = napi_function;
   } else if (JS_IsObject(v)) {
-    /* napi_external is reported once externals exist (M2). */
-    *result = napi_object;
+    *result = qn_is_external(v) ? napi_external : napi_object;
   } else if (JS_IsBool(v)) {
     *result = napi_boolean;
   } else if (JS_IsUndefined(v)) {

@@ -1,0 +1,17 @@
+# LeakSanitizer suppressions for the vendored Node.js tests (QJSNAPI_SANITIZE).
+#
+# Only leaks that the Node.js tests make by design belong here: a napi_ref
+# owned by the addon (ReferenceOwnership::kUserland) that the addon never
+# deletes. Node.js leaks the same reference; it just does not run its tests
+# under LeakSanitizer. Every entry names the function that creates the leaked
+# reference, so a leak anywhere else is still reported.
+
+# test_reference/test_finalizer.c: when the JS finalizer throws (the point of
+# the test), FinalizeExternalCallJs returns at NODE_API_CALL_RETURN_VOID
+# before napi_delete_reference(finalizer_ref).
+leak:CreateExternalWithJsFinalize
+
+# test_reference_double_free/test_reference_double_free.c: `new
+# MyObject(false)` wraps with NoDeleteDestructor, which frees its malloc'ed
+# holder but never deletes the napi_ref returned by napi_wrap.
+leak:test_reference_double_free.c
