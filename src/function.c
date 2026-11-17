@@ -68,7 +68,9 @@ static JSValue qn_function_call(JSContext *ctx, JSValueConst func_obj,
 
   /* Node: CallIntoModule clears the last error before every callback. */
   qn_clear_last_error(env);
+  env->host->native_depth++;
   napi_value result = f->cb(env, &info);
+  env->host->native_depth--;
 
   JSValue ret;
   if (JS_HasException(ctx)) {

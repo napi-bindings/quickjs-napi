@@ -62,7 +62,7 @@ static void throw_with_code(qjsnapi_host *host, const char *code,
   JSValue err = JS_CallConstructor(ctx, host->error_ctors[QN_ERROR], 1, &msg);
   JS_FreeValue(ctx, msg);
   if (JS_IsException(err)) return;
-  JS_SetPropertyStr(ctx, err, "code", JS_NewString(ctx, code));
+  if (code) JS_SetPropertyStr(ctx, err, "code", JS_NewString(ctx, code));
   JS_Throw(ctx, err);
 }
 
@@ -97,8 +97,10 @@ static char *qn_absolute_path(const char *path) {
 }
 
 /* file:// URL for an absolute path, as returned by
- * node_api_get_module_file_name. Bytes outside the URL path character set
- * are percent-encoded; Windows separators become '/'. */
+ * node_api_get_module_file_name: the same encoding as Node.js's
+ * url.pathToFileURL (encodePathChars, then the URL path percent-encode set):
+ * C0 controls, space, bytes >= 0x7F and " # % < > ? ` { } are
+ * percent-encoded, plus '\' on POSIX; Windows separators become '/'. */
 static char *qn_path_to_file_url(const char *abs_path) {
   static const char hex[] = "0123456789ABCDEF";
   size_t n = strlen(abs_path);
@@ -116,9 +118,7 @@ static char *qn_path_to_file_url(const char *abs_path) {
 #ifdef _WIN32
     if (c == '\\') c = '/';
 #endif
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9') ||
-        (c != 0 && strchr("-._~/:!$&'()*+,;=@", c) != NULL)) {
+    if (c > 0x20 && c < 0x7F && strchr("\"#%<>?`{}\\", c) == NULL) {
       *p++ = (char)c;
     } else {
       *p++ = '%';
@@ -233,8 +233,9 @@ static char *qn_strdup(const char *s) {
 }
 
 static int run_init(qjsnapi_host *host, const char *key, void *handle,
-                    napi_addon_register_func init, int32_t api_version,
-                    const char *file_url, JSValue *exports) {
+                    napi_module *legacy, napi_addon_register_func init,
+                    int32_t api_version, const char *file_url, bool cache,
+                    JSValue *exports) {
   JSContext *ctx = host->ctx;
   napi_env env = qn_env_new(host, api_version, file_url);
   if (!env) {
@@ -262,7 +263,9 @@ static int run_init(qjsnapi_host *host, const char *key, void *handle,
   }
 
   qn_clear_last_error(env); /* Node: CallIntoModule */
+  host->native_depth++;
   napi_value returned = init(env, exports_h);
+  host->native_depth--;
 
   if (JS_HasException(ctx)) {
     qn_scope_close(env, scope);
@@ -279,7 +282,8 @@ static int run_init(qjsnapi_host *host, const char *key, void *handle,
   rec->path = key_copy;
   rec->handle = handle;
   rec->env = env;
-  rec->exports = JS_DupValue(ctx, result);
+  rec->legacy = legacy;
+  rec->exports = cache ? JS_DupValue(ctx, result) : JS_UNDEFINED;
   qn_list_add_tail(&rec->link, &host->modules);
   *exports = result;
   return 0;
@@ -299,13 +303,6 @@ int qjsnapi_load_addon(qjsnapi_host *host, const char *path, JSValue *exports) {
     return -1;
   }
 
-  qn_module_record *cached = find_module(host, abs);
-  if (cached) {
-    free(abs);
-    *exports = JS_DupValue(ctx, cached->exports);
-    return 0;
-  }
-
   char err[1024];
   napi_module *prev_pending = qn_pending_module;
   qn_pending_module = NULL;
@@ -320,6 +317,11 @@ int qjsnapi_load_addon(qjsnapi_host *host, const char *path, JSValue *exports) {
     free(abs);
     return -1;
   }
+  /* Loaded before: the static constructor did not run again. */
+  if (legacy == NULL) {
+    qn_module_record *previous = find_module(host, abs);
+    if (previous) legacy = previous->legacy;
+  }
 
   napi_addon_register_func init =
       (napi_addon_register_func)qn_dlsym(handle, "napi_register_module_v1");
@@ -329,8 +331,14 @@ int qjsnapi_load_addon(qjsnapi_host *host, const char *path, JSValue *exports) {
   int32_t version = QN_DEFAULT_MODULE_API_VERSION;
   if (init != NULL) {
     if (get_version != NULL) version = get_version();
-  } else if (legacy != NULL && legacy->nm_register_func != NULL) {
+  } else if (legacy != NULL) {
     init = legacy->nm_register_func;
+    if (init == NULL) {
+      /* Node: napi_module_register_by_symbol */
+      throw_with_code(host, NULL, "Module has no declared entry point.");
+      free(abs);
+      return -1;
+    }
   } else {
     char msg[1024];
     snprintf(msg, sizeof(msg), "Module did not self-register: '%s'.", abs);
@@ -351,7 +359,8 @@ int qjsnapi_load_addon(qjsnapi_host *host, const char *path, JSValue *exports) {
     JS_ThrowOutOfMemory(ctx);
     return -1;
   }
-  int r = run_init(host, abs, handle, init, version, url, exports);
+  int r = run_init(host, abs, handle, legacy, init, version, url, false,
+                   exports);
   free(url);
   free(abs);
   return r;
@@ -379,5 +388,5 @@ int qjsnapi_init_static_addon(qjsnapi_host *host, const char *name,
       module_api_version > 0 ? module_api_version
                              : QN_DEFAULT_MODULE_API_VERSION);
   if (version < 0) return -1;
-  return run_init(host, name, NULL, init, version, name, exports);
+  return run_init(host, name, NULL, NULL, init, version, name, true, exports);
 }

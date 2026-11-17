@@ -19,11 +19,19 @@
 
 #include "qjsnapi_internal.h"
 
+/* The Node.js release whose Node-API behaviour is reproduced (and whose
+ * test suite is vendored, see tools/sync_node_tests.py). */
 #ifndef QJSNAPI_NODE_VERSION_MAJOR
 #define QJSNAPI_NODE_VERSION_MAJOR 22
-#define QJSNAPI_NODE_VERSION_MINOR 14
-#define QJSNAPI_NODE_VERSION_PATCH 0
+#define QJSNAPI_NODE_VERSION_MINOR 23
+#define QJSNAPI_NODE_VERSION_PATCH 4
 #endif
+
+static const napi_node_version qn_node_version = {
+    QJSNAPI_NODE_VERSION_MAJOR, QJSNAPI_NODE_VERSION_MINOR,
+    QJSNAPI_NODE_VERSION_PATCH, "quickjs-napi"};
+
+const napi_node_version *qjsnapi_node_version(void) { return &qn_node_version; }
 
 /* Indexed by napi_status, same wording as Node.js. */
 static const char *const qn_error_messages[] = {
@@ -106,6 +114,7 @@ napi_env qn_env_new(qjsnapi_host *host, int32_t module_api_version,
   qn_list_init(&env->finalizing_reflist);
   qn_list_init(&env->pending_finalizers);
   qn_list_init(&env->deferreds);
+  qn_list_init(&env->async_contexts);
   if (module_filename_url) {
     env->module_filename = qn_strdup(module_filename_url);
     if (!env->module_filename) goto fail;
@@ -138,6 +147,7 @@ void qn_env_teardown(napi_env env) {
   }
   qn_env_finalize_refs(env);
   qn_env_free_deferreds(env);
+  qn_env_free_async_contexts(env);
 }
 
 void qn_env_free(napi_env env) {
@@ -165,13 +175,13 @@ static JSValue qn_noop(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue *host_values(qjsnapi_host *host, size_t *count) {
   /* Fields are contiguous in qjsnapi_host, from function_proto to
    * holders (checked below). */
-  *count = (size_t)(&host->bigint_to_hex - &host->function_proto) + 1;
+  *count = (size_t)(&host->buffer_make - &host->function_proto) + 1;
   return &host->function_proto;
 }
 
-_Static_assert(offsetof(qjsnapi_host, bigint_to_hex) -
+_Static_assert(offsetof(qjsnapi_host, buffer_make) -
                        offsetof(qjsnapi_host, function_proto) ==
-                   (1 + QN_ERROR_KIND_COUNT + 19) * sizeof(JSValue),
+                   (1 + QN_ERROR_KIND_COUNT + 21) * sizeof(JSValue),
                "host JSValue fields must be contiguous");
 
 static void host_free_values(qjsnapi_host *host) {
@@ -255,6 +265,7 @@ qjsnapi_host *qjsnapi_host_create(JSContext *ctx) {
   if (qn_function_class_init(host) < 0) goto fail;
   if (qn_lifetime_init(host) < 0) goto fail;
   if (qn_builtins_init(host) < 0) goto fail;
+  if (qn_buffer_init(host) < 0) goto fail;
 
   JS_SetContextOpaque(ctx, host);
   return host;
@@ -315,12 +326,9 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_get_version(node_api_basic_env env,
 
 NAPI_EXTERN napi_status NAPI_CDECL napi_get_node_version(
     node_api_basic_env env, const napi_node_version **version) {
-  static const napi_node_version node_version = {
-      QJSNAPI_NODE_VERSION_MAJOR, QJSNAPI_NODE_VERSION_MINOR,
-      QJSNAPI_NODE_VERSION_PATCH, "quickjs-napi"};
   CHECK_ENV(env);
   CHECK_ARG(env, version);
-  *version = &node_version;
+  *version = &qn_node_version;
   return qn_clear_last_error(env);
 }
 

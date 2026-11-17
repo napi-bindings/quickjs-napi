@@ -6,11 +6,14 @@ Node-API implementation for QuickJS (2026-06-04, from `../quickjs-build`).
 Addons built for Node.js (node-gyp, node-addon-api, napi-rs) are loaded
 unchanged: they resolve `napi_*` from the `quickjs-napi` executable.
 
-Status: milestone **M3** (M1 values, strings, objects, properties,
+Status: milestone **M4** (M1 values, strings, objects, properties,
 functions, classes, errors; M2 references, externals, wrapping, finalizers,
 type tags, instance data, `napi_run_script`; M3 ArrayBuffer, TypedArray,
-DataView, BigInt, Date, Promise). 129 of 155 Node-API functions are
-implemented and pass 30 tests of the Node.js `js-native-api` suite (see
+DataView, BigInt, Date, Promise; M4 the synchronous `node_api.h`: Buffer,
+async context, `napi_make_callback`, callback scopes,
+`napi_fatal_exception`). 141 of 155 Node-API functions are implemented and
+pass 30 tests of the Node.js `js-native-api` suite and 10 of its `node-api`
+suite (see
 `test/node/README.md`); the others exist as generated stubs that return
 `napi_generic_failure` with a "not implemented yet" message, so that every
 addon still loads. `NAPI_EXPERIMENTAL` APIs are not provided. See
@@ -59,6 +62,38 @@ addon still loads. `NAPI_EXPERIMENTAL` APIs are not provided. See
   exceeded`, as V8 does past its own limit; for an out-of-bounds,
   non-detached view of a resizable buffer the byte offset is reported as 0
   (V8 reports the stored offset), since QuickJS does not expose it.
+
+## Buffer and the synchronous node_api.h
+
+- Buffers are instances of a minimal Node.js `Buffer` (`src/buffer.js`,
+  embedded in the library): a `Uint8Array` subclass with `Buffer.from`,
+  `alloc`, `allocUnsafe`, `isBuffer`, `byteLength`, `concat`, `compare` and
+  `toString`/`write`/`equals`/`copy`/`fill`/`slice`/`toJSON`/`indexOf` for
+  utf8, utf16le, latin1, ascii, hex, base64 and base64url. The library
+  installs no global; `qjsnapi_host_get_buffer()` gives the class to the
+  embedder. `napi_create_buffer` returns zero-filled memory (Node.js:
+  uninitialized). As in Node.js 22, `napi_is_buffer` and
+  `napi_get_buffer_info` accept any ArrayBufferView; external buffers use
+  the memory in place and their finalizer is queued after collection.
+- No async_hooks: an async context only records that it exists. What
+  remains of Node's callback scopes is the microtask checkpoint when the
+  outermost scope closes with no JavaScript below the native code; from a
+  Node-API callback called by JavaScript (the usual case) nothing runs
+  early, as in Node.js. `napi_fatal_exception` reaches
+  `process.on('uncaughtException')` synchronously.
+- `napi_get_node_version` reports 22.23.4, the Node.js release whose
+  behaviour is reproduced, with release name `quickjs-napi`
+  (`qjsnapi_node_version()`; the executable's `process.version` matches).
+- Every `qjsnapi_load_addon` runs the addon's initializer again with a new
+  env, like `process.dlopen` (re-`require` after deleting the cache entry
+  gives new exports); a legacy `napi_module` registered by the first
+  `dlopen` is reused. File URLs (`node_api_get_module_file_name`) are
+  encoded like Node's `url.pathToFileURL`.
+- Deviation: `node_api_create_buffer_from_arraybuffer` with an
+  out-of-range offset + length returns `napi_pending_exception`; Node.js
+  returns `napi_ok` with the RangeError pending and no result.
+- Not yet (M5, with the libuv event loop): async work, thread-safe
+  functions, async cleanup hooks, `napi_get_uv_event_loop`.
 
 ## Build
 
@@ -154,7 +189,10 @@ loads `.js`, `.json` and `.node` files with Node.js resolution rules
 `exitCode`, `exit`, `on`/`emit` for `exit`, `uncaughtException` and
 `unhandledRejection`, `nextTick`, `cwd`), `global`, `gc()`, timers
 (`setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`; builtin
-modules `timers` and `timers/promises`), and the quickjs-libc helpers
+modules `timers` and `timers/promises`), `Buffer` (also `require('buffer')`),
+minimal builtin modules `util` (`promisify`, `types`), `url`
+(`pathToFileURL`, `fileURLToPath`) and `vm` (`runInNewContext`, a new realm
+of the same runtime), `process.version`, and the quickjs-libc helpers
 (`console.log`, `print`, `scriptArgs`). As in Node.js, an exception no
 frame catches (a timer, a microtask, a Node-API finalizer) goes to
 `process.on('uncaughtException')` or ends the process with exit code 1, and
@@ -163,7 +201,7 @@ package `exports` maps are not supported yet.
 
 Embedding: see `include/qjsnapi.h`
 (`qjsnapi_host_create`, `qjsnapi_load_addon`, `qjsnapi_init_static_addon`,
-`qjsnapi_host_destroy`). An embedder's event loop calls
+`qjsnapi_host_get_buffer`, `qjsnapi_node_version`, `qjsnapi_host_destroy`). An embedder's event loop calls
 `qjsnapi_host_run_finalizers` once per iteration and installs
 `qjsnapi_host_set_uncaught_handler` for exceptions thrown by finalizers.
 
@@ -181,9 +219,11 @@ Embedding: see `include/qjsnapi.h`
 | `src/object.c` | properties, `napi_define_properties`, property names, prototype, freeze/seal, `instanceof` |
 | `src/error.c` | errors and exceptions |
 | `src/builtins.c` | ArrayBuffer, TypedArray, DataView, BigInt, Date, Promise/deferred |
+| `src/buffer.c`, `src/buffer.js` | Buffer APIs and the minimal Buffer class (embedded at build time) |
+| `src/node_api.c` | async context, `napi_make_callback`, callback scopes, `napi_fatal_exception` |
 | `src/loader.c` | `.node` loading: `napi_register_module_v1`, API version, legacy `napi_module_register` |
 | `src/stubs_generated.c` | generated by `tools/gen_stubs.py`, do not edit |
-| `host/main.c`, `host/bootstrap.js` | the `quickjs-napi` executable: event loop, CommonJS loader, timers, `process` (embedded at build time by `cmake/embed.cmake`) |
+| `host/main.c`, `host/bootstrap.js` | the `quickjs-napi` executable: event loop, CommonJS loader, timers, `process` (embedded at build time by `cmake/embed.cmake`), `buffer`, `util`, `url`, `vm` |
 | `test/addons`, `test/js` | our test addons; the JS tests also run under Node.js as reference |
 | `test/node` | Node.js conformance tests (vendored, see its README) |
 | `test/unit` | C embedding test (teardown order, scopes, error state, finalizer queue) |

@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Vendors the Node.js js-native-api conformance tests into test/node/.
+"""Vendors the Node.js Node-API conformance tests into test/node/.
 
     tools/sync_node_tests.py <node-checkout>
 
-<node-checkout> is a checkout of nodejs/node (only test/js-native-api and
-LICENSE are needed, e.g. a sparse clone of the tag below). The script copies
-the tests listed in TESTS, then generates test/node/js-native-api/tests.cmake
-from each binding.gyp, so the build needs neither Python nor node-gyp.
+<node-checkout> is a checkout of nodejs/node (only test/js-native-api,
+test/node-api, test/common and LICENSE are needed, e.g. a sparse clone of the
+tag below). For each suite the script copies the tests listed in TESTS into
+test/node/<suite>/, then generates test/node/<suite>/tests.cmake from each
+binding.gyp, so the build needs neither Python nor node-gyp.
+
+Keys of SKIP_TARGETS, SKIP_SCRIPTS, CHILD_RUNS and PATCHES start with the
+suite ("js-native-api/..." or "node-api/..."): both suites have tests with
+the same name (test_exception, test_general, test_instance_data).
 
 To enable more tests as milestones land, add their directory names to TESTS
 and run the script again.
@@ -28,55 +33,79 @@ import sys
 
 NODE_TAG = "v22.23.4"
 
-# Tests enabled per milestone (see PIANO-IMPLEMENTAZIONE.md, section 6).
-TESTS = [
-    # M1
-    "2_function_arguments",
-    "3_callbacks",
-    "4_object_factory",
-    "5_function_factory",
-    "test_array",
-    "test_constructor",
-    "test_conversions",
-    "test_error",
-    "test_handle_scope",
-    "test_new_target",
-    "test_number",
-    "test_properties",
-    "test_string",
-    "test_symbol",
-    # M2
-    "6_object_wrap",
-    "7_factory_wrap",
-    "8_passing_wrapped",
-    "test_cannot_run_js",
-    "test_exception",
-    "test_function",
-    "test_general",
-    "test_instance_data",
-    "test_object",
-    "test_reference",
-    "test_reference_double_free",
-    # M3 (test_sharedarraybuffer is not synced: it needs the
-    # NAPI_EXPERIMENTAL node_api_create_sharedarraybuffer)
-    "test_bigint",
-    "test_dataview",
-    "test_date",
-    "test_promise",
-    "test_typedarray",
-]
+# Tests enabled per suite and milestone (see PIANO-IMPLEMENTAZIONE.md,
+# section 6).
+TESTS = {
+    "js-native-api": [
+        # M1
+        "2_function_arguments",
+        "3_callbacks",
+        "4_object_factory",
+        "5_function_factory",
+        "test_array",
+        "test_constructor",
+        "test_conversions",
+        "test_error",
+        "test_handle_scope",
+        "test_new_target",
+        "test_number",
+        "test_properties",
+        "test_string",
+        "test_symbol",
+        # M2
+        "6_object_wrap",
+        "7_factory_wrap",
+        "8_passing_wrapped",
+        "test_cannot_run_js",
+        "test_exception",
+        "test_function",
+        "test_general",
+        "test_instance_data",
+        "test_object",
+        "test_reference",
+        "test_reference_double_free",
+        # M3 (test_sharedarraybuffer is not synced: it needs the
+        # NAPI_EXPERIMENTAL node_api_create_sharedarraybuffer)
+        "test_bigint",
+        "test_dataview",
+        "test_date",
+        "test_promise",
+        "test_typedarray",
+    ],
+    "node-api": [
+        # M4. Not synced yet (M5, event loop and threads): the tests that
+        # include uv.h (test_async, test_async_cleanup_hook,
+        # test_callback_scope, test_cleanup_hook, test_fatal,
+        # test_instance_data, test_threadsafe_function, test_uv_loop,
+        # test_uv_threadpool_size). Not planned: test_async_context and
+        # test_make_callback_recurse (async_hooks, domain),
+        # test_worker_* (worker_threads).
+        "1_hello_world",
+        "test_buffer",
+        "test_env_teardown_gc",
+        "test_exception",
+        "test_fatal_exception",
+        "test_general",
+        "test_init_order",
+        "test_make_callback",
+        "test_null_init",
+        "test_reference_by_node_api_version",
+    ],
+}
 
 # Targets not built, with the reason.
 SKIP_TARGETS = {
-    ("6_object_wrap", "myobject_basic_finalizer"):
+    ("js-native-api/6_object_wrap", "myobject_basic_finalizer"):
         "NAPI_EXPERIMENTAL: the project headers do not declare the "
         "experimental APIs",
 }
 
 # Scripts not run, with the reason.
 SKIP_SCRIPTS = {
-    "6_object_wrap/test-basic-finalizer.js":
+    "js-native-api/6_object_wrap/test-basic-finalizer.js":
         "needs myobject_basic_finalizer (NAPI_EXPERIMENTAL)",
+    "node-api/test_make_callback/test-async-hooks.js":
+        "needs async_hooks",
 }
 
 # Scripts that spawn their own child process. `args` are passed to the
@@ -84,16 +113,16 @@ SKIP_SCRIPTS = {
 # require() instead (module !== require.main), as the Node.js parent does.
 # `pass` must match the output; `fail` must not.
 CHILD_RUNS = {
-    "test_exception/testFinalizerException.js": {
+    "js-native-api/test_exception/testFinalizerException.js": {
         "args": ["child"],
         "pass": "Error during Finalize",
     },
-    "test_general/testEnvCleanup.js": {
+    "js-native-api/test_general/testEnvCleanup.js": {
         "args": ["child"],
         "pass": "(for simple wrap.*for second wrap|for second wrap.*for simple wrap)",
         "fail": "for wrap, removeWrap|for first wrap",
     },
-    "test_instance_data/test.js": {
+    "js-native-api/test_instance_data/test.js": {
         "require": True,
         "pass": "deleting addon data",
         "fail": "Mismatched|Error",
@@ -101,60 +130,68 @@ CHILD_RUNS = {
 }
 
 # Files of Node.js test/common copied verbatim next to our shim.
-COMMON_FILES = ["gc.js"]
+COMMON_FILES = ["gc.js", "tick.js"]
 
-SHARED_FILES = ["common.h", "common-inl.h", "entry_point.h"]
+# Shared headers of each suite (node-api tests include
+# ../../js-native-api/common.h).
+SHARED_FILES = {
+    "js-native-api": ["common.h", "common-inl.h", "entry_point.h"],
+    "node-api": [],
+}
 
-# Documented deviations, applied after copying. Each entry is
+# Documented deviations, applied right after copying each test (before its
+# binding.gyp is read). Each entry is
 # (file, old text, new text, reason); the sync fails if `old` is not found,
 # so a changed upstream test is never patched silently. Only differences of
-# the JS engine itself belong here, never Node-API semantics.
+# the JS engine, or capabilities the quickjs-napi host does not have
+# (worker_threads, child_process, fs, experimental APIs), belong here, never
+# Node-API semantics.
 PATCHES = [
-    ("test_constructor/test.js",
+    ("js-native-api/test_constructor/test.js",
      "/^TypeError: Cannot assign to read only property 'readonlyValue' of "
      "object '#<MyObject>'$/",
      "/^TypeError: (?:Cannot assign to read only property 'readonlyValue' "
      "of object '#<MyObject>'|'readonlyValue' is read-only)$/",
      "engine message: QuickJS words the read-only TypeError differently"),
-    ("test_constructor/test.js",
+    ("js-native-api/test_constructor/test.js",
      "/^TypeError: Cannot set property .* of #<.*> which has only a getter$/",
      "/^TypeError: (?:Cannot set property .* of #<.*> which has only a "
      "getter|no setter for property)$/",
      "engine message: QuickJS words the getter-only TypeError differently"),
-    ("test_properties/test.js",
+    ("js-native-api/test_properties/test.js",
      "/^TypeError: Cannot assign to read only property '.*' of object "
      "'#<Object>'$/",
      "/^TypeError: (?:Cannot assign to read only property '.*' of object "
      "'#<Object>'|'.*' is read-only)$/",
      "engine message: QuickJS words the read-only TypeError differently"),
-    ("test_properties/test.js",
+    ("js-native-api/test_properties/test.js",
      "/^TypeError: Cannot set property .* of #<Object> which has only a "
      "getter$/",
      "/^TypeError: (?:Cannot set property .* of #<Object> which has only a "
      "getter|no setter for property)$/",
      "engine message: QuickJS words the getter-only TypeError differently"),
-    ("6_object_wrap/test.js",
+    ("js-native-api/6_object_wrap/test.js",
      "/^TypeError: Cannot set property .* of #<.*> which has only a getter$/",
      "/^TypeError: (?:Cannot set property .* of #<.*> which has only a "
      "getter|no setter for property)$/",
      "engine message: QuickJS words the getter-only TypeError differently"),
-    ("test_object/test.js",
+    ("js-native-api/test_object/test.js",
      "/Cannot add property w, object is not extensible/",
      "/Cannot add property w, object is not extensible|"
      "^TypeError: object is not extensible$/",
      "engine message: QuickJS words the non-extensible TypeError differently"),
-    ("test_object/test.js",
+    ("js-native-api/test_object/test.js",
      "/Cannot delete property 'x' of #<Object>/",
      "/Cannot delete property 'x' of #<Object>|"
      "^TypeError: could not delete property$/",
      "engine message: QuickJS words the non-configurable TypeError "
      "differently"),
-    ("test_object/test.js",
+    ("js-native-api/test_object/test.js",
      "/Cannot assign to read only property 'x' of object '#<Object>/",
      "/Cannot assign to read only property 'x' of object '#<Object>|"
      "^TypeError: 'x' is read-only$/",
      "engine message: QuickJS words the read-only TypeError differently"),
-    ("test_object/test_object.c",
+    ("js-native-api/test_object/test_object.c",
      "                                           \"Invalid type index\"));             \\\n"
      "    }                                                                          \\\n",
      "                                           \"Invalid type index\"));             \\\n"
@@ -162,7 +199,7 @@ PATCHES = [
      "    }                                                                          \\\n",
      "test bug: after throwing, the macro went on reading type_tags[index] "
      "out of bounds (undefined behaviour, trapped by UBSan)"),
-    ("test_string/test_string.c",
+    ("js-native-api/test_string/test_string.c",
      "  // We do not want the string to be copied.\n"
      "  if (copied) {\n"
      "    return napi_generic_failure;\n"
@@ -172,10 +209,85 @@ PATCHES = [
      "  // run), as with Node.js built with the V8 sandbox.\n"
      "  (void)copied;\n",
      "engine capability: external strings are always copied"),
+    ("node-api/1_hello_world/test.js",
+     "const { Worker } = require('worker_threads');\n",
+     "",
+     "host capability: no worker_threads"),
+    ("node-api/1_hello_world/test.js",
+     "new Worker(`\n"
+     "const { parentPort } = require('worker_threads');\n"
+     "const msg = require(${JSON.stringify(bindingPath)}).hello();\n"
+     "parentPort.postMessage(msg)`, { eval: true })\n"
+     "  .on('message', common.mustCall((msg) => assert.strictEqual(msg, 'world')));\n",
+     "// quickjs-napi: no worker_threads.\n",
+     "host capability: no worker_threads"),
+    ("node-api/test_buffer/binding.gyp",
+     '        "NAPI_EXPERIMENTAL",\n'
+     '        "NODE_API_EXPERIMENTAL_NO_WARNING"\n',
+     '        "NAPI_VERSION=10"\n',
+     "experimental API: the project headers ignore NAPI_EXPERIMENTAL (it "
+     "would select NAPI_VERSION 8); the stable APIs used need version 10"),
+    ("node-api/test_buffer/test_buffer.c",
+     "static char externalSharedArrayBufferData[1];\n",
+     "#if 0 /* quickjs-napi: NAPI_EXPERIMENTAL "
+     "node_api_create_external_sharedarraybuffer is not provided */\n"
+     "static char externalSharedArrayBufferData[1];\n",
+     "experimental API: node_api_create_external_sharedarraybuffer is not "
+     "provided"),
+    ("node-api/test_buffer/test_buffer.c",
+     "static napi_value getDeleterCallCount(",
+     "#endif\n\nstatic napi_value getDeleterCallCount(",
+     "experimental API: node_api_create_external_sharedarraybuffer is not "
+     "provided"),
+    ("node-api/test_buffer/test_buffer.c",
+     "      DECLARE_NODE_API_PROPERTY(\"newExternalSharedArrayBuffer\",\n"
+     "                                newExternalSharedArrayBuffer),\n",
+     "",
+     "experimental API: node_api_create_external_sharedarraybuffer is not "
+     "provided"),
+    ("node-api/test_buffer/test.js",
+     "  let sab = binding.newExternalSharedArrayBuffer();\n"
+     "  assert(util.types.isSharedArrayBuffer(sab));\n"
+     "  sab = null;\n"
+     "  global.gc();\n"
+     "  await tick(10);\n"
+     "  console.log('gc3');\n"
+     "  assert.strictEqual(binding.getDeleterCallCount(), 3);\n",
+     "  // quickjs-napi: node_api_create_external_sharedarraybuffer\n"
+     "  // (NAPI_EXPERIMENTAL) is not provided.\n",
+     "experimental API: node_api_create_external_sharedarraybuffer is not "
+     "provided"),
+    ("node-api/test_general/test.js",
+     "const tmpdir = require('../../common/tmpdir');\n"
+     "const child_process = require('child_process');\n"
+     "const fs = require('fs');\n"
+     "const path = require('path');\n",
+     "",
+     "host capability: no child_process, fs, path"),
+    ("node-api/test_general/test.js",
+     "tmpdir.refresh();\n",
+     "",
+     "host capability: no child_process, fs, path"),
+    ("node-api/test_general/test.js",
+     "  const urlTestDir = tmpdir.resolve('foo%#bar');\n",
+     "  // quickjs-napi: no child_process, fs, path (the encoding of '%' and\n"
+     "  // '#' in the file URL is checked by test/js/test_node_api.js).\n"
+     "  if (false) {\n"
+     "  const urlTestDir = tmpdir.resolve('foo%#bar');\n",
+     "host capability: no child_process, fs, path"),
+    ("node-api/test_general/test.js",
+     "    maxRetries: 256,\n"
+     "  });\n"
+     "}\n",
+     "    maxRetries: 256,\n"
+     "  });\n"
+     "  }\n"
+     "}\n",
+     "host capability: no child_process, fs, path"),
 ]
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEST = os.path.join(ROOT, "test", "node", "js-native-api")
+TEST_ROOT = os.path.join(ROOT, "test", "node")
 
 
 def read_gyp(path):
@@ -189,58 +301,56 @@ def cmake_list(items):
     return " ".join('"%s"' % i for i in items)
 
 
-def main(argv):
-    if len(argv) != 1:
-        print(__doc__)
-        return 2
-    src_root = os.path.join(argv[0], "test", "js-native-api")
-    if not os.path.isdir(src_root):
-        raise SystemExit("not a Node.js checkout: %s" % argv[0])
+def apply_patches(suite, test):
+    prefix = "%s/%s/" % (suite, test)
+    for rel, old, new, reason in PATCHES:
+        if not rel.startswith(prefix):
+            continue
+        path = os.path.join(TEST_ROOT, rel)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        if old not in text:
+            raise SystemExit("patch for %s no longer applies (%s)" % (rel, reason))
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text.replace(old, new))
+        print("patched %s: %s" % (rel, reason))
 
-    if os.path.isdir(DEST):
-        shutil.rmtree(DEST)
-    os.makedirs(DEST)
-    for name in SHARED_FILES:
-        shutil.copy2(os.path.join(src_root, name), os.path.join(DEST, name))
-    common_dst = os.path.join(os.path.dirname(DEST), "common")
-    for name in COMMON_FILES:
-        shutil.copy2(os.path.join(argv[0], "test", "common", name),
-                     os.path.join(common_dst, name))
-    # Only the Node.js license itself (the tests are Node.js code); the rest
-    # of the file covers bundled dependencies that are not vendored here.
-    with open(os.path.join(argv[0], "LICENSE"), encoding="utf-8") as f:
-        license_text = f.read()
-    end = license_text.find("The Node.js license applies to all parts")
-    if end < 0:
-        raise SystemExit("unexpected Node.js LICENSE layout")
-    with open(os.path.join(os.path.dirname(DEST), "LICENSE.nodejs"), "w",
-              encoding="utf-8", newline="\n") as f:
-        f.write(license_text[:end].rstrip() + "\n")
+
+def sync_suite(node, suite):
+    src_root = os.path.join(node, "test", suite)
+    dest = os.path.join(TEST_ROOT, suite)
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+    os.makedirs(dest)
+    for name in SHARED_FILES[suite]:
+        shutil.copy2(os.path.join(src_root, name), os.path.join(dest, name))
 
     lines = [
         "# GENERATED by tools/sync_node_tests.py from Node.js %s - do not edit."
         % NODE_TAG,
-        "# qjsnapi_node_test(<dir> TARGET <name> SOURCES ... DEFINES ...",
+        "# qjsnapi_node_test(<suite> <dir> TARGET <name> SOURCES ... DEFINES ...",
         "#                   SCRIPTS ...)",
-        "# qjsnapi_node_child_run(<dir> <script> [REQUIRE] ARGS ... PASS <regex>",
-        "#                        [FAIL <regex>])",
+        "# qjsnapi_node_child_run(<suite> <dir> <script> [REQUIRE] ARGS ...",
+        "#                        PASS <regex> [FAIL <regex>])",
         "",
     ]
-    for test in TESTS:
+    for test in TESTS[suite]:
         src = os.path.join(src_root, test)
-        dst = os.path.join(DEST, test)
+        dst = os.path.join(dest, test)
         shutil.copytree(src, dst)
-        gyp = read_gyp(os.path.join(src, "binding.gyp"))
+        apply_patches(suite, test)
+        gyp = read_gyp(os.path.join(dst, "binding.gyp"))
+        key = "%s/%s" % (suite, test)
         all_scripts = sorted(f for f in os.listdir(src) if f.endswith(".js"))
         scripts = [f for f in all_scripts
-                   if "%s/%s" % (test, f) not in SKIP_SCRIPTS
-                   and "%s/%s" % (test, f) not in CHILD_RUNS]
+                   if "%s/%s" % (key, f) not in SKIP_SCRIPTS
+                   and "%s/%s" % (key, f) not in CHILD_RUNS]
         for target in gyp["targets"]:
-            if (test, target["target_name"]) in SKIP_TARGETS:
+            if (key, target["target_name"]) in SKIP_TARGETS:
                 continue
             sources = [s for s in target.get("sources", [])
                        if s.endswith((".c", ".cc", ".cpp"))]
-            lines.append("qjsnapi_node_test(%s" % test)
+            lines.append("qjsnapi_node_test(%s %s" % (suite, test))
             lines.append("  TARGET %s" % target["target_name"])
             lines.append("  SOURCES %s" % cmake_list(sources))
             if target.get("defines"):
@@ -249,10 +359,10 @@ def main(argv):
             # Scripts are registered once, with the first target.
             scripts = []
         for f in all_scripts:
-            run = CHILD_RUNS.get("%s/%s" % (test, f))
+            run = CHILD_RUNS.get("%s/%s" % (key, f))
             if not run:
                 continue
-            line = "qjsnapi_node_child_run(%s %s" % (test, f)
+            line = "qjsnapi_node_child_run(%s %s %s" % (suite, test, f)
             if run.get("require"):
                 line += " REQUIRE"
             if run.get("args"):
@@ -263,22 +373,40 @@ def main(argv):
             lines.append(line + ")")
         lines.append("")
 
-    with open(os.path.join(DEST, "tests.cmake"), "w", encoding="utf-8",
+    with open(os.path.join(dest, "tests.cmake"), "w", encoding="utf-8",
               newline="\n") as f:
         f.write("\n".join(lines))
+    print("synced %d %s tests into %s" % (len(TESTS[suite]), suite, dest))
 
-    for rel, old, new, reason in PATCHES:
-        path = os.path.join(DEST, rel)
-        if not os.path.exists(path):
-            continue  # test not enabled
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
-        if old not in text:
-            raise SystemExit("patch for %s no longer applies (%s)" % (rel, reason))
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text.replace(old, new))
-        print("patched %s: %s" % (rel, reason))
-    print("synced %d tests from Node.js into %s" % (len(TESTS), DEST))
+
+def main(argv):
+    if len(argv) != 1:
+        print(__doc__)
+        return 2
+    node = argv[0]
+    for suite in TESTS:
+        if not os.path.isdir(os.path.join(node, "test", suite)):
+            raise SystemExit("not a Node.js checkout with test/%s: %s"
+                             % (suite, node))
+
+    common_dst = os.path.join(TEST_ROOT, "common")
+    for name in COMMON_FILES:
+        shutil.copy2(os.path.join(node, "test", "common", name),
+                     os.path.join(common_dst, name))
+    # Only the Node.js license itself (the tests are Node.js code); the rest
+    # of the file covers bundled dependencies that are not vendored here.
+    with open(os.path.join(node, "LICENSE"), encoding="utf-8") as f:
+        license_text = f.read()
+    end = license_text.find("The Node.js license applies to all parts")
+    if end < 0:
+        raise SystemExit("unexpected Node.js LICENSE layout")
+    with open(os.path.join(TEST_ROOT, "LICENSE.nodejs"), "w",
+              encoding="utf-8", newline="\n") as f:
+        f.write(license_text[:end].rstrip() + "\n")
+
+    for suite in TESTS:
+        sync_suite(node, suite)
+
     return 0
 
 

@@ -441,7 +441,9 @@ void qn_call_finalizer(napi_env env, napi_finalize cb, void *data,
   qn_scope *scope = qn_scope_open(env, false);
   uint32_t open_before = env->open_handle_scopes;
   qn_clear_last_error(env);
+  env->host->native_depth++;
   cb(env, data, hint);
+  env->host->native_depth--;
   if (env->open_handle_scopes != open_before) {
     napi_fatal_error("qn_call_finalizer", NAPI_AUTO_LENGTH,
                      "a finalizer left a handle scope open", NAPI_AUTO_LENGTH);
