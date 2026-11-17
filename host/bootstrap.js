@@ -1,7 +1,7 @@
 // quickjs-napi host bootstrap: CommonJS modules and a minimal `process`.
 //
 // Evaluated once by host/main.c, which passes the native helpers. The
-// completion value is a function: (natives) => { runMain, emitExit }.
+// completion value is a function: (natives) => { runMain, emitExit, ... }.
 //
 // Module resolution follows Node.js for what addon packages use: relative
 // and absolute paths, extensions .js/.json/.node, directories (package.json
@@ -316,8 +316,11 @@
   }
 
   // --------------------------------------------------------------- timers
-  // Run by the host loop one callback at a time (runTimers), so that
-  // microtasks and Node-API finalizers run between callbacks as in Node.js.
+  // The lists live here; the host owns one uv_timer_t and one uv_idle_t
+  // and runs the callbacks one at a time (runDueTimer, runImmediate), with
+  // a microtask checkpoint after each, as Node.js does. rearm() tells the
+  // host when the next timer is due and whether something keeps the loop
+  // alive, every time the lists or the ref state change.
   const timers = [];
   const immediates = [];
   let nextTimerId = 1;
@@ -332,6 +335,29 @@
     }
   }
 
+  function rearmTimers() {
+    const now = Date.now();
+    let wait = -1;
+    let refed = false;
+    for (const t of timers) {
+      const d = Math.max(t._due - now, 0);
+      if (wait < 0 || d < wait) wait = d;
+      if (t._ref) refed = true;
+    }
+    natives.armTimer(wait, refed);
+  }
+
+  function rearmImmediates() {
+    let pending = false;
+    let refed = false;
+    for (const i of immediates) {
+      if (!i._active) continue;
+      pending = true;
+      if (i._ref) refed = true;
+    }
+    natives.armImmediate(pending, refed);
+  }
+
   class Timeout {
     constructor(fn, args, ms, repeat) {
       this._id = nextTimerId++;
@@ -343,10 +369,14 @@
       this._active = true;
       this._ref = true;
     }
-    ref() { this._ref = true; return this; }
-    unref() { this._ref = false; return this; }
+    ref() { this._ref = true; rearmTimers(); return this; }
+    unref() { this._ref = false; rearmTimers(); return this; }
     hasRef() { return this._ref; }
-    refresh() { this._due = Date.now() + this._ms; return this; }
+    refresh() {
+      this._due = Date.now() + this._ms;
+      if (this._active) rearmTimers();
+      return this;
+    }
     close() { clearTimeout(this); return this; }
     [Symbol.toPrimitive]() { return this._id; }
   }
@@ -358,8 +388,8 @@
       this._active = true;
       this._ref = true;
     }
-    ref() { this._ref = true; return this; }
-    unref() { this._ref = false; return this; }
+    ref() { this._ref = true; rearmImmediates(); return this; }
+    unref() { this._ref = false; rearmImmediates(); return this; }
     hasRef() { return this._ref; }
   }
 
@@ -372,12 +402,14 @@
     checkCallback(fn);
     const t = new Timeout(fn, args, delay(ms), false);
     timers.push(t);
+    rearmTimers();
     return t;
   }
   function setInterval(fn, ms, ...args) {
     checkCallback(fn);
     const t = new Timeout(fn, args, delay(ms), true);
     timers.push(t);
+    rearmTimers();
     return t;
   }
   function clearTimeout(t) {
@@ -387,16 +419,21 @@
       timer._active = false;
       const i = timers.indexOf(timer);
       if (i >= 0) timers.splice(i, 1);
+      rearmTimers();
     }
   }
   function setImmediate(fn, ...args) {
     checkCallback(fn);
     const i = new Immediate(fn, args);
     immediates.push(i);
+    rearmImmediates();
     return i;
   }
   function clearImmediate(i) {
-    if (i instanceof Immediate) i._active = false;
+    if (i instanceof Immediate && i._active) {
+      i._active = false;
+      rearmImmediates();
+    }
   }
   function queueMicrotask(fn) {
     checkCallback(fn);
@@ -417,37 +454,46 @@
     }
   }
 
-  // Runs one due timer, else one immediate, and returns 0; otherwise returns
-  // the delay in ms until the next referenced timer, or -1 when none is left.
-  function runTimers() {
+  // Timers phase: runs the earliest due timer and returns true, or returns
+  // false when none is due (the host then stops calling).
+  function runDueTimer() {
     const now = Date.now();
     let next = null;
     for (const t of timers) {
       if (t._due <= now && (next === null || t._due < next._due)) next = t;
     }
-    if (next !== null) {
-      if (next._repeat) {
-        next._due = now + next._ms;
-      } else {
-        next._active = false;
-        timers.splice(timers.indexOf(next), 1);
-      }
-      invoke(next);
-      return 0;
+    if (next === null) {
+      rearmTimers();
+      return false;
     }
+    if (next._repeat) {
+      next._due = now + next._ms;
+    } else {
+      next._active = false;
+      timers.splice(timers.indexOf(next), 1);
+    }
+    rearmTimers();
+    invoke(next);
+    return true;
+  }
+
+  // Check phase: the host runs as many immediates as were queued when the
+  // phase began (immediateCount); newer ones wait for the next iteration.
+  function immediateCount() {
+    return immediates.length;
+  }
+  function runImmediate() {
     while (immediates.length > 0) {
       const i = immediates.shift();
       if (i._active) {
         i._active = false;
+        rearmImmediates();
         invoke(i);
-        return 0;
+        return true;
       }
     }
-    let wait = -1;
-    for (const t of timers) {
-      if (t._ref && (wait < 0 || t._due - now < wait)) wait = Math.max(t._due - now, 1);
-    }
-    return wait;
+    rearmImmediates();
+    return false;
   }
 
   Object.assign(globalThis, {
@@ -566,5 +612,12 @@
     mainModule.loaded = true;
   }
 
-  return { runMain, emitExit, runTimers, fatalException, unhandledRejection };
+  function emitBeforeExit() {
+    process.emit('beforeExit', process.exitCode | 0);
+  }
+
+  return {
+    runMain, emitExit, emitBeforeExit, runDueTimer, immediateCount,
+    runImmediate, fatalException, unhandledRejection,
+  };
 })

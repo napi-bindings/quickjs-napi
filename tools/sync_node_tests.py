@@ -73,13 +73,9 @@ TESTS = {
         "test_typedarray",
     ],
     "node-api": [
-        # M4. Not synced yet (M5, event loop and threads): the tests that
-        # include uv.h (test_async, test_async_cleanup_hook,
-        # test_callback_scope, test_cleanup_hook, test_fatal,
-        # test_instance_data, test_threadsafe_function, test_uv_loop,
-        # test_uv_threadpool_size). Not planned: test_async_context and
-        # test_make_callback_recurse (async_hooks, domain),
-        # test_worker_* (worker_threads).
+        # Not planned: test_async_context and test_make_callback_recurse
+        # (async_hooks, domain), test_worker_* (worker_threads).
+        # M4
         "1_hello_world",
         "test_buffer",
         "test_env_teardown_gc",
@@ -90,8 +86,26 @@ TESTS = {
         "test_make_callback",
         "test_null_init",
         "test_reference_by_node_api_version",
+        # M5 (libuv event loop, threads)
+        "test_async",
+        "test_async_cleanup_hook",
+        "test_callback_scope",
+        "test_cleanup_hook",
+        "test_fatal",
+        "test_instance_data",
+        "test_threadsafe_function",
+        "test_uv_loop",
+        "test_uv_threadpool_size",
     ],
 }
+
+# Options of a test's "// Flags:" line passed to quickjs-napi; the others
+# tune V8 (garbage collection) and have no QuickJS counterpart.
+SUPPORTED_FLAGS = [
+    "--expose-gc",
+    "--force-node-api-uncaught-exceptions-policy",
+    "--no-force-node-api-uncaught-exceptions-policy",
+]
 
 # Targets not built, with the reason.
 SKIP_TARGETS = {
@@ -106,6 +120,12 @@ SKIP_SCRIPTS = {
         "needs myobject_basic_finalizer (NAPI_EXPERIMENTAL)",
     "node-api/test_make_callback/test-async-hooks.js":
         "needs async_hooks",
+    "node-api/test_async/test-async-hooks.js": "needs async_hooks",
+    "node-api/test_callback_scope/test-async-hooks.js": "needs async_hooks",
+    "node-api/test_fatal/test_threads_report.js":
+        "needs --report-on-fatalerror (diagnostic reports)",
+    "node-api/test_uv_threadpool_size/node-options.js":
+        "needs --env-file and child_process",
 }
 
 # Scripts that spawn their own child process. `args` are passed to the
@@ -127,6 +147,55 @@ CHILD_RUNS = {
         "pass": "deleting addon data",
         "fail": "Mismatched|Error",
     },
+    # The parent part runs normally too (also_run, the child_process part is
+    # patched out); the child throws from a completion callback.
+    "node-api/test_async/test.js": {
+        "args": ["child"],
+        "pass": "test_async_cb_exception",
+        "also_run": True,
+    },
+    "node-api/test_cleanup_hook/test.js": {
+        "args": ["child"],
+        "pass": "cleanup[(]42[)]",
+    },
+    # napi_fatal_error aborts the child (common.nodeProcessAborted).
+    "node-api/test_fatal/test.js": {
+        "args": ["child"],
+        "pass": "FATAL ERROR: test_fatal::Test fatal message",
+        "abort": True,
+    },
+    "node-api/test_fatal/test2.js": {
+        "args": ["child"],
+        "pass": "FATAL ERROR: test_fatal::Test fatal message",
+        "abort": True,
+    },
+    "node-api/test_fatal/test_threads.js": {
+        "args": ["child"],
+        "pass": "FATAL ERROR: work_thread foobar",
+        "abort": True,
+    },
+    # Loaded with require() (requireAs): async work, buffer finalizer and
+    # thread-safe function with instance data; success is exit code 0.
+    "node-api/test_instance_data/test.js": {
+        "require": True,
+    },
+    # The child of testUnref: a thread-safe function unreferenced while its
+    # thread still produces; the process must exit (code 0) without waiting.
+    # Run with binding.MAX_QUEUE_SIZE (2) and with an unbounded queue (0).
+    "node-api/test_threadsafe_function/test.js": {
+        "variants": [["child", "2"], ["child", "0"]],
+        "also_run": True,
+    },
+}
+
+# Addons loaded directly in a fresh process (Node: spawnSync with
+# `-e require(addon)`), with the regular expression the output must match.
+ADDON_RUNS = {
+    # testProcessExit: instance data finalized at exit, exit code 0.
+    "node-api/test_instance_data": [
+        ("test_ref_then_set", "^addon_free[\\r\\n]*$"),
+        ("test_set_then_ref", "^addon_free[\\r\\n]*$"),
+    ],
 }
 
 # Files of Node.js test/common copied verbatim next to our shim.
@@ -264,6 +333,69 @@ PATCHES = [
      "const path = require('path');\n",
      "",
      "host capability: no child_process, fs, path"),
+    ("node-api/test_async/test.js",
+     "const child_process = require('child_process');\n",
+     "",
+     "host capability: no child_process (the child mode runs as its own "
+     "CTest, see CHILD_RUNS)"),
+    ("node-api/test_async/test.js",
+     "const p = child_process.spawnSync(\n"
+     "  process.execPath, [ __filename, 'child' ]);\n"
+     "assert.ifError(p.error);\n"
+     "assert.ok(p.stderr.toString().includes(testException));\n",
+     "",
+     "host capability: no child_process (the child mode runs as its own "
+     "CTest, see CHILD_RUNS)"),
+    ("node-api/test_async_cleanup_hook/test.js",
+     "const path = require('path');\n"
+     "const { Worker } = require('worker_threads');\n"
+     "const binding = path.resolve(__dirname, `./build/${common.buildType}/binding`);\n"
+     "\n"
+     "const w = new Worker(`require(${JSON.stringify(binding)})`, { eval: true });\n"
+     "w.on('exit', common.mustCall(() => require(binding)));\n",
+     "// quickjs-napi: no worker_threads; the addon is loaded once, in the\n"
+     "// main thread, and its async cleanup hooks run when the process exits.\n"
+     "require(`./build/${common.buildType}/binding`);\n",
+     "host capability: no worker_threads"),
+    ("node-api/test_cleanup_hook/test.js",
+     "const child_process = require('child_process');\n",
+     "",
+     "host capability: no child_process (the child mode runs as its own "
+     "CTest, see CHILD_RUNS)"),
+    ("node-api/test_fatal/test.js",
+     "const child_process = require('child_process');\n",
+     "",
+     "host capability: no child_process (the child mode runs as its own "
+     "CTest, see CHILD_RUNS)"),
+    ("node-api/test_fatal/test2.js",
+     "const child_process = require('child_process');\n",
+     "",
+     "host capability: no child_process (the child mode runs as its own "
+     "CTest, see CHILD_RUNS)"),
+    ("node-api/test_fatal/test_threads.js",
+     "const child_process = require('child_process');\n",
+     "",
+     "host capability: no child_process (the child mode runs as its own "
+     "CTest, see CHILD_RUNS)"),
+    ("node-api/test_threadsafe_function/test.js",
+     "const { fork } = require('child_process');\n",
+     "",
+     "host capability: no child_process"),
+    ("node-api/test_threadsafe_function/test.js",
+     "// Start a child process to test rapid teardown\n"
+     ".then(() => testUnref(binding.MAX_QUEUE_SIZE))\n"
+     "\n"
+     "// Start a child process with an infinite queue to test rapid teardown\n"
+     ".then(() => testUnref(0))\n",
+     "// quickjs-napi: no child_process; the child mode of testUnref runs as\n"
+     "// its own CTest (CHILD_RUNS).\n",
+     "host capability: no child_process"),
+    ("node-api/test_threadsafe_function/binding.gyp",
+     "        'NAPI_EXPERIMENTAL'\n",
+     "        'NAPI_VERSION=10'\n",
+     "experimental API: the project headers ignore NAPI_EXPERIMENTAL (it "
+     "would select NAPI_VERSION 8, i.e. the legacy uncaught-exception "
+     "policy); the target exercises version 10"),
     ("node-api/test_general/test.js",
      "tmpdir.refresh();\n",
      "",
@@ -301,6 +433,38 @@ def cmake_list(items):
     return " ".join('"%s"' % i for i in items)
 
 
+def child_run_line(suite, test, script, run, args, name):
+    line = "qjsnapi_node_child_run(%s %s %s" % (suite, test, script)
+    if name:
+        line += ' NAME "%s"' % name
+    if run.get("require"):
+        line += " REQUIRE"
+    if run.get("abort"):
+        line += " ABORT"
+    if args:
+        line += " ARGS %s" % cmake_list(args)
+    if run.get("pass"):
+        line += " PASS %s" % cmake_list([run["pass"]])
+    if run.get("fail"):
+        line += " FAIL %s" % cmake_list([run["fail"]])
+    return line + ")"
+
+
+def script_flags(path):
+    """The supported options of the script's "// Flags:" line."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            head = f.read().splitlines()[:5]
+    except (OSError, UnicodeDecodeError) as e:
+        raise SystemExit("cannot read %s: %s" % (path, e))
+    for line in head:
+        line = line.strip()
+        if line.startswith("// Flags:"):
+            return [o for o in line[len("// Flags:"):].split()
+                    if o in SUPPORTED_FLAGS]
+    return []
+
+
 def apply_patches(suite, test):
     prefix = "%s/%s/" % (suite, test)
     for rel, old, new, reason in PATCHES:
@@ -330,8 +494,11 @@ def sync_suite(node, suite):
         % NODE_TAG,
         "# qjsnapi_node_test(<suite> <dir> TARGET <name> SOURCES ... DEFINES ...",
         "#                   SCRIPTS ...)",
-        "# qjsnapi_node_child_run(<suite> <dir> <script> [REQUIRE] ARGS ...",
-        "#                        PASS <regex> [FAIL <regex>])",
+        "# qjsnapi_node_flags(<suite> <dir> <script> <option>...)",
+        "# qjsnapi_node_child_run(<suite> <dir> <script> [NAME <name>]",
+        "#                        [REQUIRE] [ABORT]",
+        "#                        [ARGS ...] [PASS <regex>] [FAIL <regex>])",
+        "# qjsnapi_node_addon_run(<suite> <dir> <target> PASS <regex>)",
         "",
     ]
     for test in TESTS[suite]:
@@ -344,7 +511,13 @@ def sync_suite(node, suite):
         all_scripts = sorted(f for f in os.listdir(src) if f.endswith(".js"))
         scripts = [f for f in all_scripts
                    if "%s/%s" % (key, f) not in SKIP_SCRIPTS
-                   and "%s/%s" % (key, f) not in CHILD_RUNS]
+                   and ("%s/%s" % (key, f) not in CHILD_RUNS
+                        or CHILD_RUNS["%s/%s" % (key, f)].get("also_run"))]
+        for f in all_scripts:
+            flags = script_flags(os.path.join(dst, f))
+            if flags and "%s/%s" % (key, f) not in SKIP_SCRIPTS:
+                lines.append("qjsnapi_node_flags(%s %s %s %s)"
+                             % (suite, test, f, cmake_list(flags)))
         for target in gyp["targets"]:
             if (key, target["target_name"]) in SKIP_TARGETS:
                 continue
@@ -362,15 +535,14 @@ def sync_suite(node, suite):
             run = CHILD_RUNS.get("%s/%s" % (key, f))
             if not run:
                 continue
-            line = "qjsnapi_node_child_run(%s %s %s" % (suite, test, f)
-            if run.get("require"):
-                line += " REQUIRE"
-            if run.get("args"):
-                line += " ARGS %s" % cmake_list(run["args"])
-            line += " PASS %s" % cmake_list([run["pass"]])
-            if run.get("fail"):
-                line += " FAIL %s" % cmake_list([run["fail"]])
-            lines.append(line + ")")
+            # "variants": one test per argument list, named after it.
+            for args, name in (
+                    [(v, "%s:%s" % (f, "-".join(v))) for v in run["variants"]]
+                    if run.get("variants") else [(run.get("args"), None)]):
+                lines.append(child_run_line(suite, test, f, run, args, name))
+        for target, regex in ADDON_RUNS.get(key, []):
+            lines.append("qjsnapi_node_addon_run(%s %s %s PASS %s)"
+                         % (suite, test, target, cmake_list([regex])))
         lines.append("")
 
     with open(os.path.join(dest, "tests.cmake"), "w", encoding="utf-8",

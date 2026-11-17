@@ -208,6 +208,7 @@ static void ref_enqueue(napi_ref ref) {
   if (!ref->queued) {
     qn_list_add_tail(&ref->queue_link, &ref->env->pending_finalizers);
     ref->queued = true;
+    qn_loop_schedule_finalizers(ref->env->host);
   }
 }
 
@@ -343,12 +344,16 @@ static void ref_delete(napi_ref ref) {
 /* Node: Reference::Finalize(). The target is gone (or the env is being torn
  * down): reset the value, unlink, run the user finalizer, and delete the
  * reference if the runtime owns it. A user-owned reference may be deleted by
- * its own finalizer, so it is not touched after the callback. */
+ * its own finalizer, so it is not touched after the callback; at teardown it
+ * is parked in env->orphan_refs first, so it is freed with the env when the
+ * addon never deletes it (qn_env_free_orphan_refs). */
 static void ref_finalize(napi_ref ref) {
   napi_env env = ref->env;
   if (!ref->tracker) ref_reset(ref);
   bool delete_me = ref->runtime_owned;
   unlink_if_linked(&ref->link);
+  if (!delete_me && env->destructing)
+    qn_list_add_tail(&ref->link, &env->orphan_refs);
   ref_dequeue(ref);
   ref_detach_holder(ref);
   napi_finalize cb = ref->finalize_cb;
@@ -436,6 +441,12 @@ void qn_report_uncaught(qjsnapi_host *host, JSValue exc) {
 /* Node: node_napi_env__::CallFinalizer<true> (CallbackIntoModule). */
 void qn_call_finalizer(napi_env env, napi_finalize cb, void *data,
                        void *hint) {
+  qn_call_finalizer_policy(env, cb, data, hint, true);
+}
+
+/* Node: node_napi_env__::CallFinalizer<enforce_policy>. */
+void qn_call_finalizer_policy(napi_env env, napi_finalize cb, void *data,
+                              void *hint, bool enforce_policy) {
   if (!cb) return;
   JSContext *ctx = env->ctx;
   qn_scope *scope = qn_scope_open(env, false);
@@ -449,13 +460,8 @@ void qn_call_finalizer(napi_env env, napi_finalize cb, void *data,
                      "a finalizer left a handle scope open", NAPI_AUTO_LENGTH);
   }
   if (scope) qn_scope_close(env, scope);
-  if (JS_HasException(ctx)) {
-    JSValue exc = JS_GetException(ctx);
-    if (!env->can_call_into_js)
-      JS_FreeValue(ctx, exc); /* Node: terminatedOrTerminating() */
-    else
-      qn_report_uncaught(env->host, exc);
-  }
+  if (JS_HasException(ctx))
+    qn_report_callback_exception(env, JS_GetException(ctx), enforce_policy);
 }
 
 static size_t env_drain(napi_env env) {
@@ -483,6 +489,11 @@ void qn_env_finalize_refs(napi_env env) {
   finalize_all(&env->finalizing_reflist);
   finalize_all(&env->reflist);
   env_drain(env); /* targets that died during the passes above */
+}
+
+void qn_env_free_orphan_refs(napi_env env) {
+  while (!qn_list_empty(&env->orphan_refs))
+    ref_delete(QN_CONTAINER_OF(env->orphan_refs.next, struct napi_ref__, link));
 }
 
 size_t qjsnapi_host_run_finalizers(qjsnapi_host *host) {

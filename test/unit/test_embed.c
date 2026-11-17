@@ -1,8 +1,9 @@
 /*
  * Embedding test: drives Node-API directly through a statically linked addon
  * (qjsnapi_init_static_addon) and checks behaviour that a JS test cannot
- * observe: teardown order, handle-scope misuse, stubs, error state, and the
- * finalizer queue of the embedding API (qjsnapi_host_run_finalizers).
+ * observe: teardown order, handle-scope misuse, error state, the host's
+ * event loop, and the finalizer queue of the embedding API
+ * (qjsnapi_host_run_finalizers).
  *
  * Built against a Debug QuickJS: JS_FreeRuntime asserts that every object
  * was released, so any leaked JSValue aborts this test.
@@ -152,14 +153,12 @@ static void check_errors(napi_env env) {
   EXPECT(info->error_code == napi_ok);
   EXPECT(info->error_message == NULL);
 
-  /* Stubs report themselves by name (napi_get_uv_event_loop stays a stub
-   * until the event loop milestone, M5). */
+  /* The loop of napi_get_uv_event_loop is the host's own (created by
+   * qjsnapi_host_create, closed by qjsnapi_host_destroy). */
   struct uv_loop_s *loop = NULL;
-  EXPECT(napi_get_uv_event_loop(env, &loop) == napi_generic_failure);
-  EXPECT(napi_get_last_error_info(env, &info) == napi_ok);
-  EXPECT(info->error_code == napi_generic_failure);
-  EXPECT(info->error_message != NULL &&
-         strstr(info->error_message, "napi_get_uv_event_loop") != NULL);
+  EXPECT(napi_get_uv_event_loop(env, &loop) == napi_ok);
+  EXPECT(loop != NULL && loop == qjsnapi_host_get_loop(g_host));
+  EXPECT(napi_get_uv_event_loop(env, NULL) == napi_invalid_arg);
 
   /* NULL env never crashes. */
   EXPECT(napi_get_undefined(NULL, &v) == napi_invalid_arg);

@@ -1,7 +1,13 @@
 /*
  * quickjs-napi host executable.
  *
- *   quickjs-napi <script.js> [args...]
+ *   quickjs-napi [options] <script.js> [args...]
+ *
+ * Options (Node.js names):
+ *   --expose-gc   accepted; gc() is always available
+ *   --force-node-api-uncaught-exceptions-policy[=true|false],
+ *   --no-force-node-api-uncaught-exceptions-policy
+ *                 see qjsnapi_host_set_force_uncaught_exceptions_policy
  *
  * Runs the script as a CommonJS module (host/bootstrap.js): `require` loads
  * .js, .json and Node-API addons (.node), with Node.js resolution rules for
@@ -11,18 +17,27 @@
  * scriptArgs). Builtin modules: module, timers, timers/promises, buffer,
  * util, url, vm (minimal subsets, see host/bootstrap.js).
  *
- * Event loop (run_loop), one iteration:
- *   1. microtasks (promise jobs)
- *   2. unhandled promise rejections -> process 'unhandledRejection', else
- *      uncaught exception (Node.js default `--unhandled-rejections=throw`)
- *   3. Node-API finalizers queued by the GC (Node: a SetImmediate callback)
- *   4. one due timer, else one immediate (bootstrap.js runTimers)
- *   5. sleep until the next timer when nothing else is pending
+ * Event loop: the host's libuv loop (qjsnapi_host_get_loop), run with
+ * uv_run until nothing referenced is left, then process 'beforeExit' (which
+ * may schedule more work) and 'exit'. On the loop:
+ *   g_timer  uv_timer_t armed by bootstrap.js for the earliest JS timer
+ *            (natives.armTimer); referenced only while a referenced timer
+ *            exists. Timers phase: due timers run one at a time.
+ *   g_check  uv_check_t (unreferenced): runs the immediates queued before
+ *            the check phase began, one at a time.
+ *   g_idle   uv_idle_t, active while immediates are queued (referenced
+ *            only for referenced ones): the poll phase does not block.
+ *   plus the library's handles: queued Node-API finalizers, async work,
+ *   thread-safe functions, and whatever addons add.
+ * After every callback a checkpoint (host_checkpoint, also installed as
+ * the library's checkpoint) runs the promise jobs, then reports unhandled
+ * rejections (process 'unhandledRejection', else an uncaught exception:
+ * Node.js default `--unhandled-rejections=throw`), until both are empty.
  * An uncaught exception goes to process 'uncaughtException' listeners or
  * prints the error and exits with code 1, as in Node.js.
  *
- * The executable exports every napi_* symbol (see CMakeLists.txt): addons
- * built for Node.js resolve them from this process.
+ * The executable exports every napi_* and uv_* symbol (see CMakeLists.txt):
+ * addons built for Node.js resolve them from this process.
  */
 #include <errno.h>
 #include <stdbool.h>
@@ -42,6 +57,8 @@
 #include <unistd.h>
 #endif
 
+#include <uv.h>
+
 #include "bootstrap_js.h" /* generated: qn_bootstrap_js, qn_bootstrap_js_len */
 #include "qjsnapi.h"
 #include "quickjs-libc.h"
@@ -53,9 +70,15 @@
 
 static int g_exit_requested;
 static int g_exit_code;
-/* Object returned by bootstrap.js: runMain, emitExit, runTimers,
- * fatalException, unhandledRejection. */
+/* Object returned by bootstrap.js: runMain, emitExit, emitBeforeExit,
+ * runDueTimer, immediateCount, runImmediate, fatalException,
+ * unhandledRejection. */
 static JSValue g_api;
+static JSContext *g_ctx;
+static uv_loop_t *g_loop;
+static uv_timer_t g_timer;
+static uv_check_t g_check;
+static uv_idle_t g_idle;
 
 /* ------------------------------------------------------------------------ */
 /* File system helpers (UTF-8 paths on every platform)                      */
@@ -279,6 +302,7 @@ static JSValue native_exit(JSContext *ctx, JSValueConst this_val, int argc,
   if (argc > 0) JS_ToInt32(ctx, &code, argv[0]);
   g_exit_requested = 1;
   g_exit_code = code;
+  if (g_loop) uv_stop(g_loop);
   JS_ThrowInternalError(ctx, "process.exit(%d)", (int)code);
   JS_SetUncatchableException(ctx, 1);
   return JS_EXCEPTION;
@@ -331,6 +355,47 @@ static JSValue native_run_in_new_context(JSContext *ctx, JSValueConst this_val,
   return r;
 }
 
+static void on_timer(uv_timer_t *handle);
+static void on_idle(uv_idle_t *handle) { (void)handle; }
+
+/* natives.armTimer(delayMs, referenced): delayMs < 0 stops the timer. */
+static JSValue native_arm_timer(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+  (void)this_val;
+  double delay = -1;
+  if (argc > 0) JS_ToFloat64(ctx, &delay, argv[0]);
+  bool refed = argc > 1 && JS_ToBool(ctx, argv[1]) > 0;
+  if (delay < 0) {
+    uv_timer_stop(&g_timer);
+  } else {
+    if (delay > 2147483647.0) delay = 2147483647.0;
+    uv_timer_start(&g_timer, on_timer, (uint64_t)delay, 0);
+  }
+  if (refed)
+    uv_ref((uv_handle_t *)&g_timer);
+  else
+    uv_unref((uv_handle_t *)&g_timer);
+  return JS_UNDEFINED;
+}
+
+/* natives.armImmediate(pending, referenced) */
+static JSValue native_arm_immediate(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+  (void)this_val;
+  bool pending = argc > 0 && JS_ToBool(ctx, argv[0]) > 0;
+  bool refed = argc > 1 && JS_ToBool(ctx, argv[1]) > 0;
+  if (pending) {
+    uv_idle_start(&g_idle, on_idle);
+    if (refed)
+      uv_ref((uv_handle_t *)&g_idle);
+    else
+      uv_unref((uv_handle_t *)&g_idle);
+  } else {
+    uv_idle_stop(&g_idle);
+  }
+  return JS_UNDEFINED;
+}
+
 static const char *platform_name(void) {
 #if defined(_WIN32)
   return "win32";
@@ -360,6 +425,8 @@ static JSValue make_natives(JSContext *ctx, int argc, char **argv) {
   set_fn(ctx, n, "exit", native_exit, 1);
   set_fn(ctx, n, "writeStderr", native_write_stderr, 1);
   set_fn(ctx, n, "runInNewContext", native_run_in_new_context, 1);
+  set_fn(ctx, n, "armTimer", native_arm_timer, 2);
+  set_fn(ctx, n, "armImmediate", native_arm_immediate, 2);
   JS_SetPropertyStr(ctx, n, "Buffer",
                     qjsnapi_host_get_buffer(qjsnapi_host_from_context(ctx)));
   const napi_node_version *nv = qjsnapi_node_version();
@@ -503,53 +570,71 @@ static bool process_rejections(JSContext *ctx) {
   return any;
 }
 
-static void sleep_ms(double ms) {
-  if (ms > 1000.0 * 60) ms = 1000.0 * 60;
-#ifdef _WIN32
-  Sleep((DWORD)ms);
-#else
-  struct timespec ts;
-  ts.tv_sec = (time_t)(ms / 1000.0);
-  ts.tv_nsec = (long)((ms - (double)ts.tv_sec * 1000.0) * 1e6);
-  while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {
+/* Promise jobs, then unhandled rejections, until both are empty (Node:
+ * processTicksAndRejections). Also the library's checkpoint. */
+static void host_checkpoint(qjsnapi_host *host, JSContext *ctx, void *opaque) {
+  (void)host;
+  (void)opaque;
+  JSRuntime *rt = JS_GetRuntime(ctx);
+  while (!g_exit_requested) {
+    JSContext *job_ctx;
+    int r = JS_ExecutePendingJob(rt, &job_ctx);
+    if (r < 0) {
+      handle_uncaught(job_ctx, JS_GetException(job_ctx));
+      continue;
+    }
+    if (r > 0) continue;
+    if (!process_rejections(ctx)) break;
   }
-#endif
+  if (g_exit_requested) uv_stop(g_loop);
 }
 
-static void run_loop(JSContext *ctx, qjsnapi_host *host) {
-  JSRuntime *rt = JS_GetRuntime(ctx);
-  JSValue run_timers = JS_GetPropertyStr(ctx, g_api, "runTimers");
-  while (!g_exit_requested) {
-    /* 1. microtasks */
-    for (;;) {
-      JSContext *job_ctx;
-      int r = JS_ExecutePendingJob(rt, &job_ctx);
-      if (r == 0) break;
-      if (r < 0) handle_uncaught(job_ctx, JS_GetException(job_ctx));
-      if (g_exit_requested) break;
-    }
-    if (g_exit_requested) break;
-    /* 2. unhandled rejections */
-    if (process_rejections(ctx)) continue;
-    /* 3. Node-API finalizers */
-    if (qjsnapi_host_run_finalizers(host) > 0) continue;
-    /* 4. timers and immediates */
-    JSValue r = JS_Call(ctx, run_timers, JS_UNDEFINED, 0, NULL);
-    if (JS_IsException(r)) {
-      handle_uncaught(ctx, JS_GetException(ctx));
-      continue;
-    }
-    double wait = -1;
-    JS_ToFloat64(ctx, &wait, r);
-    JS_FreeValue(ctx, r);
-    if (wait == 0 || JS_IsJobPending(rt) ||
-        qjsnapi_host_has_pending_finalizers(host))
-      continue;
-    if (wait < 0) break; /* nothing left to do */
-    /* 5. wait for the next timer */
-    sleep_ms(wait);
+/* Calls a function of g_api without arguments; an exception is uncaught.
+ * Returns its result converted to a boolean (false on exception). */
+static bool call_api(const char *name, int32_t *int_result) {
+  JSContext *ctx = g_ctx;
+  JSValue fn = JS_GetPropertyStr(ctx, g_api, name);
+  JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 0, NULL);
+  JS_FreeValue(ctx, fn);
+  if (JS_IsException(r)) {
+    handle_uncaught(ctx, JS_GetException(ctx));
+    return false;
   }
-  JS_FreeValue(ctx, run_timers);
+  bool b = JS_ToBool(ctx, r) > 0;
+  if (int_result) JS_ToInt32(ctx, int_result, r);
+  JS_FreeValue(ctx, r);
+  return b;
+}
+
+/* Timers phase: every due timer, one at a time. */
+static void on_timer(uv_timer_t *handle) {
+  (void)handle;
+  while (!g_exit_requested && call_api("runDueTimer", NULL))
+    host_checkpoint(NULL, g_ctx, NULL);
+  host_checkpoint(NULL, g_ctx, NULL);
+}
+
+/* Check phase: the immediates queued before it began. */
+static void on_check(uv_check_t *handle) {
+  (void)handle;
+  int32_t n = 0;
+  call_api("immediateCount", &n);
+  for (int32_t i = 0; i < n && !g_exit_requested; i++) {
+    if (!call_api("runImmediate", NULL)) break;
+    host_checkpoint(NULL, g_ctx, NULL);
+  }
+}
+
+static void run_loop(JSContext *ctx) {
+  (void)ctx;
+  while (!g_exit_requested) {
+    uv_run(g_loop, UV_RUN_DEFAULT);
+    if (g_exit_requested) break;
+    /* process 'beforeExit': listeners may schedule more work. */
+    call_api("emitBeforeExit", NULL);
+    host_checkpoint(NULL, g_ctx, NULL);
+    if (!uv_loop_alive(g_loop)) break;
+  }
 }
 
 static int run(JSContext *ctx, qjsnapi_host *host, int argc, char **argv) {
@@ -568,6 +653,7 @@ static int run(JSContext *ctx, qjsnapi_host *host, int argc, char **argv) {
   g_api = api;
   JS_SetHostPromiseRejectionTracker(JS_GetRuntime(ctx), rejection_tracker, NULL);
   qjsnapi_host_set_uncaught_handler(host, on_napi_uncaught, NULL);
+  qjsnapi_host_set_checkpoint(host, host_checkpoint, NULL);
 
   JSValue run_main = JS_GetPropertyStr(ctx, api, "runMain");
   JSValue script = JS_NewString(ctx, argv[1]);
@@ -578,7 +664,8 @@ static int run(JSContext *ctx, qjsnapi_host *host, int argc, char **argv) {
     handle_uncaught(ctx, JS_GetException(ctx));
   else
     JS_FreeValue(ctx, r);
-  run_loop(ctx, host);
+  host_checkpoint(host, ctx, NULL);
+  run_loop(ctx);
 
   int code = 0;
   if (!g_exit_requested) {
@@ -600,6 +687,7 @@ static int run(JSContext *ctx, qjsnapi_host *host, int argc, char **argv) {
   /* No JavaScript runs from here on: finalizers run at host destruction
    * with JavaScript disabled, as during Node.js environment teardown. */
   qjsnapi_host_set_uncaught_handler(host, NULL, NULL);
+  qjsnapi_host_set_checkpoint(host, NULL, NULL);
   JS_SetHostPromiseRejectionTracker(JS_GetRuntime(ctx), NULL, NULL);
   free_rejections(ctx);
   g_api = JS_UNDEFINED;
@@ -611,14 +699,56 @@ static JSValue js_gc_fn(JSContext *ctx) {
   return JS_NewCFunction(ctx, js_gc, "gc", 0);
 }
 
+static void close_host_handles(void) {
+  uv_close((uv_handle_t *)&g_timer, NULL);
+  uv_close((uv_handle_t *)&g_check, NULL);
+  uv_close((uv_handle_t *)&g_idle, NULL);
+}
+
+static const char kForcePolicy[] = "--force-node-api-uncaught-exceptions-policy";
+static const char kNoForcePolicy[] =
+    "--no-force-node-api-uncaught-exceptions-policy";
+
+/* Options before the script. Returns the index of the script in argv, or
+ * -1 after printing an error. */
+static int parse_options(int argc, char **argv, int *force_policy) {
+  int i = 1;
+  for (; i < argc && strncmp(argv[i], "--", 2) == 0; i++) {
+    const char *opt = argv[i];
+    size_t n = strlen(kForcePolicy);
+    if (strcmp(opt, "--expose-gc") == 0 || strcmp(opt, "--expose_gc") == 0) {
+      continue; /* gc() is always available */
+    } else if (strcmp(opt, kNoForcePolicy) == 0) {
+      *force_policy = 0;
+    } else if (strncmp(opt, kForcePolicy, n) == 0 &&
+               (opt[n] == '\0' || strcmp(opt + n, "=true") == 0)) {
+      *force_policy = 1;
+    } else if (strncmp(opt, kForcePolicy, n) == 0 &&
+               strcmp(opt + n, "=false") == 0) {
+      *force_policy = 0;
+    } else {
+      fprintf(stderr, "%s: bad option: %s\n", argv[0], opt);
+      return -1;
+    }
+  }
+  return i;
+}
+
 int main(int argc, char **argv) {
-  if (argc < 2) {
+  int force_policy = 0;
+  int script = parse_options(argc, argv, &force_policy);
+  if (script < 0) return 9; /* Node.js: invalid command-line option */
+  if (script >= argc) {
     fprintf(stderr,
-            "usage: %s <script.js> [args...]\n"
+            "usage: %s [options] <script.js> [args...]\n"
             "quickjs-napi: Node-API %u for QuickJS %s\n",
             argv[0], qjsnapi_napi_version(), QJS_VERSION_STR);
     return 2;
   }
+  /* From here on argv is [executable, script, args...]. */
+  argv[script - 1] = argv[0];
+  argv += script - 1;
+  argc -= script - 1;
 
   g_api = JS_UNDEFINED;
   JSRuntime *rt = JS_NewRuntime();
@@ -643,11 +773,21 @@ int main(int argc, char **argv) {
     js_std_dump_error(ctx);
     exit_code = 1;
   } else {
+    g_ctx = ctx;
+    g_loop = qjsnapi_host_get_loop(host);
+    qjsnapi_host_set_force_uncaught_exceptions_policy(host, force_policy);
+    uv_timer_init(g_loop, &g_timer);
+    uv_check_init(g_loop, &g_check);
+    uv_idle_init(g_loop, &g_idle);
+    uv_check_start(&g_check, on_check);
+    uv_unref((uv_handle_t *)&g_check);
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "gc", js_gc_fn(ctx));
     JS_FreeValue(ctx, global);
     exit_code = run(ctx, host, argc, argv);
+    close_host_handles();
     qjsnapi_host_destroy(host);
+    g_loop = NULL;
   }
 
   js_std_free_handlers(rt);

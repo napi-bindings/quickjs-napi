@@ -22,13 +22,17 @@ env:
   # UBSan findings fail the test (-fno-sanitize-recover is set by CMake too).
   UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
   ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+  # A data race fails the test at the first report.
+  TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
 
 jobs:
   # ----------------------------------------------------------------------------
   # Linux and macOS: native builds with the system compiler. The Debug builds
   # keep QuickJS's assertion that JS_FreeRuntime finds no live object, so every
   # test is also a leak check; unix-asan adds ASan + UBSan to everything,
-  # QuickJS included. The node_parity_* tests run the same addons under Node.js.
+  # QuickJS included; unix-tsan runs ThreadSanitizer over the thread-pool and
+  # thread-safe function tests (and the rest). The node_parity_* tests run the
+  # same addons under Node.js.
   # ----------------------------------------------------------------------------
   unix:
     name: ${{ matrix.name }}
@@ -52,6 +56,10 @@ jobs:
           - name: linux-gcc-asan-ubsan
             os: ubuntu-24.04
             preset: unix-asan
+            cc: gcc
+          - name: linux-gcc-tsan
+            os: ubuntu-24.04
+            preset: unix-tsan
             cc: gcc
           - name: macos-arm64-debug
             os: macos-latest
@@ -77,6 +85,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install Ninja
         run: python -m pip install ninja
+      # The ubuntu-24.04 kernel randomizes mmap with 32 bits, more than the
+      # ThreadSanitizer runtime supports ("unexpected memory mapping").
+      - name: Reduce ASLR entropy for ThreadSanitizer
+        if: matrix.preset == 'unix-tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
       - name: Configure
         run: |
           ${{ matrix.cc }} --version
