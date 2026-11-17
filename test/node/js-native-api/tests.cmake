@@ -152,3 +152,32 @@ qjsnapi_node_test(test_reference_double_free
   TARGET test_reference_double_free
   SOURCES "test_reference_double_free.c"
   SCRIPTS "test.js" "test_wrap.js")
+
+qjsnapi_node_test(test_bigint
+  TARGET test_bigint
+  SOURCES "test_bigint.c"
+  SCRIPTS "test.js")
+
+qjsnapi_node_test(test_dataview
+  TARGET test_dataview
+  SOURCES "test_dataview.c"
+  SCRIPTS "test.js")
+
+qjsnapi_node_test(test_date
+  TARGET test_date
+  SOURCES "test_date.c"
+  SCRIPTS "test.js")
+
+qjsnapi_node_test(test_promise
+  TARGET test_promise
+  SOURCES "test_promise.c"
+  SCRIPTS "test.js")
+
+qjsnapi_node_test(test_typedarray
+  TARGET test_typedarray
+  SOURCES "test_typedarray.c"
+  SCRIPTS "test.js" "test_sharedarraybuffer.js")
+qjsnapi_node_test(test_typedarray
+  TARGET test_typedarray_sharedarraybuffer
+  SOURCES "test_typedarray_sharedarraybuffer.c"
+  SCRIPTS )

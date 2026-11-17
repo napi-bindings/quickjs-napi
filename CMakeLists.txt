@@ -115,6 +115,7 @@ set(QJSNAPI_SOURCES
     src/env.c
     src/error.c
     src/function.c
+    src/builtins.c
     src/lifetime.c
     src/loader.c
     src/object.c
@@ -234,6 +235,7 @@ if(QJSNAPI_BUILD_TESTS)
   qjsnapi_test_addon(fnexport test/addons/loader/fnexport.c)
   qjsnapi_test_addon(future test/addons/loader/future.c)
   qjsnapi_test_addon(values test/addons/values/values.c)
+  qjsnapi_test_addon(binary test/addons/binary/binary.c)
 
   add_test(NAME js_hello
            COMMAND quickjs-napi
@@ -317,6 +319,10 @@ if(QJSNAPI_BUILD_TESTS)
            COMMAND quickjs-napi
                    "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_values.js"
                    "${QJSNAPI_ADDON_DIR}")
+  add_test(NAME js_binary
+           COMMAND quickjs-napi
+                   "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_binary.js"
+                   "${QJSNAPI_ADDON_DIR}")
 
   add_executable(test_embed test/unit/test_embed.c)
   set_target_properties(test_embed PROPERTIES C_STANDARD 17)
@@ -328,9 +334,9 @@ if(QJSNAPI_BUILD_TESTS)
   # sanitizers: ASan-instrumented addons cannot be loaded by a regular node.
   find_program(QJSNAPI_NODE node)
   if(QJSNAPI_NODE AND NOT CMAKE_CROSSCOMPILING AND NOT QJSNAPI_SANITIZE)
-    foreach(_t hello values)
+    foreach(_t hello values binary)
       add_test(NAME node_parity_${_t}
-               COMMAND "${QJSNAPI_NODE}"
+               COMMAND "${QJSNAPI_NODE}" --expose-gc
                        "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_${_t}.js"
                        "${QJSNAPI_ADDON_DIR}")
     endforeach()

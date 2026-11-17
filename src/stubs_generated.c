@@ -6,138 +6,13 @@
  * addons referencing them still load; calling one returns
  * napi_generic_failure with a descriptive napi_get_last_error_info().
  *
- * Implemented: 104 / 155 functions.
+ * Implemented: 129 / 155 functions.
  */
 #include "qjsnapi_internal.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_is_arraybuffer(napi_env env, napi_value value, bool* result) {
-  return qn_not_implemented(env, "napi_is_arraybuffer");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_arraybuffer(napi_env env, size_t byte_length, void** data, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_arraybuffer");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_external_arraybuffer(napi_env env, void* external_data, size_t byte_length, node_api_basic_finalize finalize_cb, void* finalize_hint, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_external_arraybuffer");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_arraybuffer_info(napi_env env, napi_value arraybuffer, void** data, size_t* byte_length) {
-  return qn_not_implemented(env, "napi_get_arraybuffer_info");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_is_typedarray(napi_env env, napi_value value, bool* result) {
-  return qn_not_implemented(env, "napi_is_typedarray");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_typedarray(napi_env env, napi_typedarray_type type, size_t length, napi_value arraybuffer, size_t byte_offset, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_typedarray");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_typedarray_info(napi_env env, napi_value typedarray, napi_typedarray_type* type, size_t* length, void** data, napi_value* arraybuffer, size_t* byte_offset) {
-  return qn_not_implemented(env, "napi_get_typedarray_info");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_dataview(napi_env env, size_t length, napi_value arraybuffer, size_t byte_offset, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_dataview");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_is_dataview(napi_env env, napi_value value, bool* result) {
-  return qn_not_implemented(env, "napi_is_dataview");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_dataview_info(napi_env env, napi_value dataview, size_t* bytelength, void** data, napi_value* arraybuffer, size_t* byte_offset) {
-  return qn_not_implemented(env, "napi_get_dataview_info");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_promise(napi_env env, napi_deferred* deferred, napi_value* promise) {
-  return qn_not_implemented(env, "napi_create_promise");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_resolve_deferred(napi_env env, napi_deferred deferred, napi_value resolution) {
-  return qn_not_implemented(env, "napi_resolve_deferred");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_reject_deferred(napi_env env, napi_deferred deferred, napi_value rejection) {
-  return qn_not_implemented(env, "napi_reject_deferred");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_is_promise(napi_env env, napi_value value, bool* is_promise) {
-  return qn_not_implemented(env, "napi_is_promise");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_date(napi_env env, double time, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_date");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_is_date(napi_env env, napi_value value, bool* is_date) {
-  return qn_not_implemented(env, "napi_is_date");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_date_value(napi_env env, napi_value value, double* result) {
-  return qn_not_implemented(env, "napi_get_date_value");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_bigint_int64(napi_env env, int64_t value, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_bigint_int64");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_bigint_uint64(napi_env env, uint64_t value, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_bigint_uint64");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_bigint_words(napi_env env, int sign_bit, size_t word_count, const uint64_t* words, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_bigint_words");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_bigint_int64(napi_env env, napi_value value, int64_t* result, bool* lossless) {
-  return qn_not_implemented(env, "napi_get_value_bigint_int64");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_bigint_uint64(napi_env env, napi_value value, uint64_t* result, bool* lossless) {
-  return qn_not_implemented(env, "napi_get_value_bigint_uint64");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_value_bigint_words(napi_env env, napi_value value, int* sign_bit, size_t* word_count, uint64_t* words) {
-  return qn_not_implemented(env, "napi_get_value_bigint_words");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_detach_arraybuffer(napi_env env, napi_value arraybuffer) {
-  return qn_not_implemented(env, "napi_detach_arraybuffer");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_is_detached_arraybuffer(napi_env env, napi_value value, bool* result) {
-  return qn_not_implemented(env, "napi_is_detached_arraybuffer");
-}
 
 NAPI_EXTERN napi_status NAPI_CDECL
 napi_async_init(napi_env env, napi_value async_resource, napi_value async_resource_name, napi_async_context* result) {

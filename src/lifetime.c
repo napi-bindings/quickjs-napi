@@ -677,6 +677,11 @@ napi_add_finalizer(napi_env env, napi_value js_object, void *finalize_data,
   return qn_clear_last_error(env);
 }
 
+int qn_attach_finalizer(napi_env env, JSValueConst obj,
+                        napi_finalize finalize_cb, void *data, void *hint) {
+  return ref_new(env, obj, 0, true, true, finalize_cb, data, hint) ? 0 : -1;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Public API: externals                                                    */
 /* ------------------------------------------------------------------------ */

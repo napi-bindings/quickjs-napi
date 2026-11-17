@@ -57,6 +57,13 @@ TESTS = [
     "test_object",
     "test_reference",
     "test_reference_double_free",
+    # M3 (test_sharedarraybuffer is not synced: it needs the
+    # NAPI_EXPERIMENTAL node_api_create_sharedarraybuffer)
+    "test_bigint",
+    "test_dataview",
+    "test_date",
+    "test_promise",
+    "test_typedarray",
 ]
 
 # Targets not built, with the reason.

@@ -28,11 +28,13 @@ Node.js, with the exceptions declared in the script.
 |---|---|
 | M1 | `2_function_arguments`, `3_callbacks`, `4_object_factory`, `5_function_factory`, `test_array`, `test_constructor`, `test_conversions`, `test_error`, `test_handle_scope`, `test_new_target`, `test_number`, `test_properties`, `test_string`, `test_symbol` |
 | M2 | `6_object_wrap`, `7_factory_wrap`, `8_passing_wrapped` (C++), `test_cannot_run_js`, `test_exception`, `test_function`, `test_general`, `test_instance_data`, `test_object`, `test_reference`, `test_reference_double_free` |
+| M3 | `test_bigint`, `test_dataview`, `test_date`, `test_promise`, `test_typedarray` (including `test_sharedarraybuffer.js`) |
 
 Not built or not run (`SKIP_TARGETS`, `SKIP_SCRIPTS`):
 
 | Test | Reason |
 |---|---|
+| `test_sharedarraybuffer` (directory) | Built with `NAPI_EXPERIMENTAL` (`node_api_create_sharedarraybuffer`, `node_api_is_sharedarraybuffer`). SharedArrayBuffer support of the stable APIs is covered by `test_typedarray/test_sharedarraybuffer.js`. |
 | `test_finalizer` (directory), `6_object_wrap/test-basic-finalizer.js` | Built with `NAPI_EXPERIMENTAL` (`node_api_post_finalizer`, finalizers run inside the GC): the project headers do not declare the experimental APIs. |
 
 Run in child mode (`CHILD_RUNS`): these scripts re-run themselves with

@@ -105,6 +105,7 @@ napi_env qn_env_new(qjsnapi_host *host, int32_t module_api_version,
   qn_list_init(&env->reflist);
   qn_list_init(&env->finalizing_reflist);
   qn_list_init(&env->pending_finalizers);
+  qn_list_init(&env->deferreds);
   if (module_filename_url) {
     env->module_filename = qn_strdup(module_filename_url);
     if (!env->module_filename) goto fail;
@@ -136,6 +137,7 @@ void qn_env_teardown(napi_env env) {
     fun(arg);
   }
   qn_env_finalize_refs(env);
+  qn_env_free_deferreds(env);
 }
 
 void qn_env_free(napi_env env) {
@@ -163,13 +165,13 @@ static JSValue qn_noop(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue *host_values(qjsnapi_host *host, size_t *count) {
   /* Fields are contiguous in qjsnapi_host, from function_proto to
    * holders (checked below). */
-  *count = (size_t)(&host->holders - &host->function_proto) + 1;
+  *count = (size_t)(&host->bigint_to_hex - &host->function_proto) + 1;
   return &host->function_proto;
 }
 
-_Static_assert(offsetof(qjsnapi_host, holders) -
+_Static_assert(offsetof(qjsnapi_host, bigint_to_hex) -
                        offsetof(qjsnapi_host, function_proto) ==
-                   (1 + QN_ERROR_KIND_COUNT + 9) * sizeof(JSValue),
+                   (1 + QN_ERROR_KIND_COUNT + 19) * sizeof(JSValue),
                "host JSValue fields must be contiguous");
 
 static void host_free_values(qjsnapi_host *host) {
@@ -252,6 +254,7 @@ qjsnapi_host *qjsnapi_host_create(JSContext *ctx) {
 
   if (qn_function_class_init(host) < 0) goto fail;
   if (qn_lifetime_init(host) < 0) goto fail;
+  if (qn_builtins_init(host) < 0) goto fail;
 
   JS_SetContextOpaque(ctx, host);
   return host;
