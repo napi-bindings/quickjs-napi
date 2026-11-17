@@ -115,16 +115,35 @@ set(QJSNAPI_SOURCES
     src/env.c
     src/error.c
     src/function.c
+    src/buffer.c
     src/builtins.c
     src/lifetime.c
     src/loader.c
+    src/node_api.c
     src/object.c
     src/scope.c
     src/string.c
     src/value.c
     src/stubs_generated.c)
 
-add_library(qjsnapi STATIC ${QJSNAPI_SOURCES})
+# JavaScript sources embedded into the library and the host as C byte arrays.
+set(QJSNAPI_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+function(qjsnapi_embed input name)
+  add_custom_command(
+    OUTPUT "${QJSNAPI_GENERATED_DIR}/${name}.h"
+    COMMAND
+      "${CMAKE_COMMAND}" -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/${input}
+      -DOUTPUT=${QJSNAPI_GENERATED_DIR}/${name}.h -DNAME=qn_${name} -P
+      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake"
+    DEPENDS ${input} cmake/embed.cmake
+    COMMENT "Embedding ${input}"
+    VERBATIM)
+endfunction()
+qjsnapi_embed(src/buffer.js buffer_js)
+qjsnapi_embed(host/bootstrap.js bootstrap_js)
+
+add_library(qjsnapi STATIC ${QJSNAPI_SOURCES}
+                           "${QJSNAPI_GENERATED_DIR}/buffer_js.h")
 set_target_properties(
   qjsnapi
   PROPERTIES C_STANDARD 17
@@ -134,7 +153,8 @@ set_target_properties(
 # The implementation is compiled against Node-API 10. Addons pick their own
 # NAPI_VERSION; it is not propagated to consumers.
 target_compile_definitions(qjsnapi PRIVATE NAPI_VERSION=10)
-target_include_directories(qjsnapi PUBLIC include PRIVATE src)
+target_include_directories(qjsnapi PUBLIC include PRIVATE src
+                                                          "${QJSNAPI_GENERATED_DIR}")
 target_link_libraries(qjsnapi PUBLIC qjs ${CMAKE_DL_LIBS})
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(qjsnapi PRIVATE -Wall -Wextra -Wno-unused-parameter
@@ -166,17 +186,6 @@ else()
       "LINKER:--whole-archive" "<LINK_ITEM>" "LINKER:--no-whole-archive")
 endif()
 set(CMAKE_C_LINK_LIBRARY_USING_QJSNAPI_WHOLE_ARCHIVE_SUPPORTED TRUE)
-
-set(QJSNAPI_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-add_custom_command(
-  OUTPUT "${QJSNAPI_GENERATED_DIR}/bootstrap_js.h"
-  COMMAND
-    "${CMAKE_COMMAND}" -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/host/bootstrap.js
-    -DOUTPUT=${QJSNAPI_GENERATED_DIR}/bootstrap_js.h -DNAME=qn_bootstrap_js -P
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake"
-  DEPENDS host/bootstrap.js cmake/embed.cmake
-  COMMENT "Embedding host/bootstrap.js"
-  VERBATIM)
 
 add_executable(quickjs-napi host/main.c
                             "${QJSNAPI_GENERATED_DIR}/bootstrap_js.h")
@@ -236,6 +245,13 @@ if(QJSNAPI_BUILD_TESTS)
   qjsnapi_test_addon(future test/addons/loader/future.c)
   qjsnapi_test_addon(values test/addons/values/values.c)
   qjsnapi_test_addon(binary test/addons/binary/binary.c)
+  qjsnapi_test_addon(node_api test/addons/node_api/node_api.c)
+  add_custom_command(
+    TARGET node_api POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -DINPUT=$<TARGET_FILE:node_api>
+            -DDIR=${QJSNAPI_ADDON_DIR} -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_addon_percent.cmake"
+    VERBATIM)
 
   add_test(NAME js_hello
            COMMAND quickjs-napi
@@ -248,16 +264,18 @@ if(QJSNAPI_BUILD_TESTS)
   # `require('../../common')` resolve exactly as in the Node.js repository.
   set(QJSNAPI_NODE_TESTS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/test/node")
   set(QJSNAPI_NODE_TESTS_BIN "${CMAKE_CURRENT_BINARY_DIR}/node-tests")
-  foreach(_f index.js assert.js gc.js require-as-module.js)
+  foreach(_f index.js assert.js gc.js tick.js require-as-module.js)
     configure_file("${QJSNAPI_NODE_TESTS_SRC}/common/${_f}"
                    "${QJSNAPI_NODE_TESTS_BIN}/common/${_f}" COPYONLY)
   endforeach()
 
-  function(qjsnapi_node_test dir)
+  # <suite> is js-native-api or node-api (test/node/<suite>/<dir>).
+  function(qjsnapi_node_test suite dir)
     cmake_parse_arguments(T "" "TARGET" "SOURCES;DEFINES;SCRIPTS" ${ARGN})
-    set(_src "${QJSNAPI_NODE_TESTS_SRC}/js-native-api/${dir}")
-    set(_bin "${QJSNAPI_NODE_TESTS_BIN}/js-native-api/${dir}")
-    set(_lib "node_${dir}_${T_TARGET}")
+    set(_src "${QJSNAPI_NODE_TESTS_SRC}/${suite}/${dir}")
+    set(_bin "${QJSNAPI_NODE_TESTS_BIN}/${suite}/${dir}")
+    string(REPLACE "-" "_" _suite_id "${suite}")
+    set(_lib "node_${_suite_id}_${dir}_${T_TARGET}")
     list(TRANSFORM T_SOURCES PREPEND "${_src}/")
     add_library(${_lib} MODULE ${T_SOURCES})
     set_target_properties(
@@ -282,7 +300,7 @@ if(QJSNAPI_BUILD_TESTS)
     add_dependencies(quickjs-napi-tests ${_lib})
     foreach(_script ${T_SCRIPTS})
       configure_file("${_src}/${_script}" "${_bin}/${_script}" COPYONLY)
-      add_test(NAME node/${dir}/${_script}
+      add_test(NAME node/${suite}/${dir}/${_script}
                COMMAND quickjs-napi "${_bin}/${_script}"
                WORKING_DIRECTORY "${_bin}")
     endforeach()
@@ -291,10 +309,10 @@ if(QJSNAPI_BUILD_TESTS)
   # A script that Node.js runs from a child process of itself (spawnSync):
   # the child mode runs directly, the output is checked by regex. REQUIRE
   # loads the script with require(), as the parent does.
-  function(qjsnapi_node_child_run dir script)
+  function(qjsnapi_node_child_run suite dir script)
     cmake_parse_arguments(T "REQUIRE" "" "ARGS;PASS;FAIL" ${ARGN})
-    set(_bin "${QJSNAPI_NODE_TESTS_BIN}/js-native-api/${dir}")
-    configure_file("${QJSNAPI_NODE_TESTS_SRC}/js-native-api/${dir}/${script}"
+    set(_bin "${QJSNAPI_NODE_TESTS_BIN}/${suite}/${dir}")
+    configure_file("${QJSNAPI_NODE_TESTS_SRC}/${suite}/${dir}/${script}"
                    "${_bin}/${script}" COPYONLY)
     if(T_REQUIRE)
       set(_cmd quickjs-napi
@@ -303,17 +321,18 @@ if(QJSNAPI_BUILD_TESTS)
     else()
       set(_cmd quickjs-napi "${_bin}/${script}" ${T_ARGS})
     endif()
-    add_test(NAME node/${dir}/${script} COMMAND ${_cmd}
-             WORKING_DIRECTORY "${_bin}")
-    set_tests_properties(node/${dir}/${script} PROPERTIES
+    set(_name node/${suite}/${dir}/${script})
+    add_test(NAME ${_name} COMMAND ${_cmd} WORKING_DIRECTORY "${_bin}")
+    set_tests_properties(${_name} PROPERTIES
                          PASS_REGULAR_EXPRESSION "${T_PASS}")
     if(T_FAIL)
-      set_tests_properties(node/${dir}/${script} PROPERTIES
+      set_tests_properties(${_name} PROPERTIES
                            FAIL_REGULAR_EXPRESSION "${T_FAIL}")
     endif()
   endfunction()
 
   include("${QJSNAPI_NODE_TESTS_SRC}/js-native-api/tests.cmake")
+  include("${QJSNAPI_NODE_TESTS_SRC}/node-api/tests.cmake")
 
   add_test(NAME js_values
            COMMAND quickjs-napi
@@ -322,6 +341,10 @@ if(QJSNAPI_BUILD_TESTS)
   add_test(NAME js_binary
            COMMAND quickjs-napi
                    "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_binary.js"
+                   "${QJSNAPI_ADDON_DIR}")
+  add_test(NAME js_node_api
+           COMMAND quickjs-napi
+                   "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_node_api.js"
                    "${QJSNAPI_ADDON_DIR}")
 
   add_executable(test_embed test/unit/test_embed.c)
@@ -334,7 +357,7 @@ if(QJSNAPI_BUILD_TESTS)
   # sanitizers: ASan-instrumented addons cannot be loaded by a regular node.
   find_program(QJSNAPI_NODE node)
   if(QJSNAPI_NODE AND NOT CMAKE_CROSSCOMPILING AND NOT QJSNAPI_SANITIZE)
-    foreach(_t hello values binary)
+    foreach(_t hello values binary node_api)
       add_test(NAME node_parity_${_t}
                COMMAND "${QJSNAPI_NODE}" --expose-gc
                        "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_${_t}.js"

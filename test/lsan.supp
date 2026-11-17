@@ -15,3 +15,14 @@ leak:CreateExternalWithJsFinalize
 # MyObject(false)` wraps with NoDeleteDestructor, which frees its malloc'ed
 # holder but never deletes the napi_ref returned by napi_wrap.
 leak:test_reference_double_free.c
+
+# node-api/test_buffer/test_finalizer.c: same as above; when the JS
+# finalizer throws, malignDeleter returns at NODE_API_CALL_RETURN_VOID before
+# napi_delete_reference(finalizer_ref).
+leak:malignFinalizerBuffer
+
+# node-api/test_env_teardown_gc/binding.c: MyObject_fini runs at teardown,
+# when JavaScript can no longer run; napi_get_named_property fails (as in
+# Node.js) and NODE_API_CALL_RETURN_VOID returns before deleting the wrap
+# reference and freeing its malloc'ed holder (both made by MyObject).
+leak:test_env_teardown_gc/binding.c

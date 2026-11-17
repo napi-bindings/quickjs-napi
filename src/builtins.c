@@ -217,6 +217,36 @@ static bool is_detached(JSContext *ctx, JSValueConst ab) {
   return true;
 }
 
+bool qn_view_data(napi_env env, JSValueConst value, void **data,
+                  size_t *length) {
+  qjsnapi_host *host = env->host;
+  JSContext *ctx = env->ctx;
+  size_t offset = 0, byte_len = 0;
+  JSValue ab;
+  if (typed_array_type(host, value) >= 0) {
+    byte_len = getter_size(ctx, host->ta_byte_length, value);
+    ab = JS_GetTypedArrayBuffer(ctx, value, &offset, NULL, NULL);
+    if (JS_IsException(ab)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));
+      offset = 0;
+      ab = JS_UNDEFINED;
+    }
+  } else if (has_class(value, host->cid_dataview)) {
+    offset = getter_size(ctx, host->dv_byte_offset, value);
+    byte_len = getter_size(ctx, host->dv_byte_length, value);
+    ab = call_getter(ctx, host->dv_buffer, value);
+  } else {
+    return false;
+  }
+  if (data) {
+    uint8_t *p = JS_IsUndefined(ab) ? NULL : buffer_data(ctx, ab, NULL);
+    *data = p ? p + offset : NULL;
+  }
+  if (length) *length = byte_len;
+  JS_FreeValue(ctx, ab);
+  return true;
+}
+
 /* ------------------------------------------------------------------------ */
 /* ArrayBuffer                                                              */
 /* ------------------------------------------------------------------------ */

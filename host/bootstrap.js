@@ -217,6 +217,10 @@
     env: {},
     platform: natives.platform,
     execPath: natives.execPath,
+    // Same as napi_get_node_version: the Node.js release whose Node-API
+    // behaviour is reproduced (process.versions.node is not set, so that
+    // packages do not take the host for Node.js itself).
+    version: `v${natives.nodeVersion}`,
     release: { name: 'quickjs-napi' },
     versions: { quickjs: natives.quickjsVersion,
                 napi: String(natives.napiVersion) },
@@ -459,6 +463,98 @@
     setImmediate: (value) => new Promise((resolve) => setImmediate(resolve, value)),
   };
   builtins.module.builtinModules.push('timers', 'timers/promises');
+
+  // --------------------------------------------- buffer, util, url, vm
+  // Buffer comes from the library (napi_create_buffer returns its
+  // instances); see src/buffer.js for what it provides.
+  globalThis.Buffer = natives.Buffer;
+  builtins.buffer = {
+    Buffer: natives.Buffer,
+    kMaxLength: 2 ** 32,
+    constants: { MAX_LENGTH: 2 ** 32 },
+  };
+
+  const tag = (v) => Object.prototype.toString.call(v).slice(8, -1);
+  const TypedArray = Object.getPrototypeOf(Int8Array);
+  const customPromisify = Symbol.for('nodejs.util.promisify.custom');
+  function promisify(fn) {
+    checkCallback(fn);
+    if (typeof fn[customPromisify] === 'function') return fn[customPromisify];
+    function promisified(...args) {
+      return new Promise((resolve, reject) => {
+        fn.call(this, ...args, (err, value) => (err ? reject(err) : resolve(value)));
+      });
+    }
+    Object.setPrototypeOf(promisified, Object.getPrototypeOf(fn));
+    return Object.defineProperties(promisified, Object.getOwnPropertyDescriptors(fn));
+  }
+  promisify.custom = customPromisify;
+  builtins.util = {
+    promisify,
+    types: {
+      isArrayBuffer: (v) => v instanceof ArrayBuffer,
+      isSharedArrayBuffer: (v) => typeof SharedArrayBuffer === 'function' &&
+                                  v instanceof SharedArrayBuffer,
+      isAnyArrayBuffer: (v) => v instanceof ArrayBuffer ||
+        (typeof SharedArrayBuffer === 'function' && v instanceof SharedArrayBuffer),
+      isArrayBufferView: (v) => ArrayBuffer.isView(v),
+      isTypedArray: (v) => v instanceof TypedArray,
+      isUint8Array: (v) => v instanceof Uint8Array,
+      isDataView: (v) => v instanceof DataView,
+      isDate: (v) => v instanceof Date,
+      isPromise: (v) => v instanceof Promise,
+      isRegExp: (v) => v instanceof RegExp,
+      isNativeError: (v) => v instanceof Error && tag(v) === 'Error',
+    },
+  };
+
+  // url.pathToFileURL: the encoding of Node.js (encodePathChars, then the
+  // URL path percent-encode set). Returns a plain object with href and
+  // pathname: QuickJS has no URL class.
+  function encodePath(p) {
+    let out = '';
+    for (const ch of p) {
+      const c = ch.codePointAt(0);
+      if (c > 0x20 && c < 0x7f && !'"#%<>?`{}'.includes(ch) &&
+          (isWindows || ch !== '\\')) {
+        out += ch;
+        continue;
+      }
+      for (const byte of natives.Buffer.from(ch, 'utf8')) {
+        out += '%' + (byte < 16 ? '0' : '') + byte.toString(16).toUpperCase();
+      }
+    }
+    return out;
+  }
+  function fileURL(pathname) {
+    const href = `file://${pathname}`;
+    return { href, protocol: 'file:', pathname, toString: () => href };
+  }
+  builtins.url = {
+    pathToFileURL(p) {
+      let resolved = resolvePath(natives.cwd(), String(p));
+      if (/[\\/]$/.test(String(p)) && !/[\\/]$/.test(resolved)) resolved += sep;
+      if (isWindows) resolved = '/' + resolved.replace(/\\/g, '/');
+      return fileURL(encodePath(resolved));
+    },
+    fileURLToPath(u) {
+      const href = typeof u === 'string' ? u : u && u.href;
+      if (typeof href !== 'string' || !href.startsWith('file://')) {
+        const err = new TypeError('The URL must be of scheme file');
+        err.code = 'ERR_INVALID_URL_SCHEME';
+        throw err;
+      }
+      let p = decodeURIComponent(href.slice(7).replace(/[?#].*$/, ''));
+      if (isWindows) p = p.replace(/^\/(?=[a-zA-Z]:)/, '').replace(/\//g, '\\');
+      return p;
+    },
+  };
+
+  // vm: only runInNewContext(code), evaluated in a new realm.
+  builtins.vm = {
+    runInNewContext: (code) => natives.runInNewContext(String(code)),
+  };
+  builtins.module.builtinModules.push('buffer', 'util', 'url', 'vm');
 
   function runMain(path) {
     const real = tryFile(resolvePath(natives.cwd(), path));

@@ -106,12 +106,20 @@ typedef struct qn_cleanup_hook {
   void *arg;
 } qn_cleanup_hook;
 
+/* One per initialization: every qjsnapi_load_addon of a path runs the
+ * initializer again with a new env, as Node.js does for each dlopen. */
 typedef struct qn_module_record {
   qn_list link;
   char *path;    /* path as given to the loader, UTF-8 */
   void *handle;  /* dlopen / LoadLibrary handle, never closed */
   napi_env env;
-  JSValue exports; /* strong reference */
+  /* napi_module registered by the library's static constructor, which only
+   * runs on the first dlopen; reused by later loads (Node.js keeps it in its
+   * global handle map). */
+  napi_module *legacy;
+  /* Static addons only (qjsnapi_init_static_addon caches its exports):
+   * strong reference, JS_UNDEFINED for shared libraries. */
+  JSValue exports;
 } qn_module_record;
 
 enum qn_error_kind {
@@ -154,6 +162,9 @@ struct qjsnapi_host {
   JSValue date_get_time;      /* Date.prototype.getTime */
   JSValue bigint_from_hex;    /* (negative, hex) => BigInt */
   JSValue bigint_to_hex;      /* (bigint) => hex string, "-" when negative */
+  /* Buffer (buffer.c, src/buffer.js). */
+  JSValue buffer_ctor;        /* Buffer */
+  JSValue buffer_make;        /* (arrayBuffer, byteOffset, length) => Buffer */
   qn_list envs;           /* napi_env__.link, in creation order */
   qn_list modules;        /* qn_module_record.link */
   int64_t external_memory; /* napi_adjust_external_memory counter */
@@ -166,6 +177,12 @@ struct qjsnapi_host {
   JSClassID cid_typed[12]; /* indexed by JSTypedArrayEnum */
   qjsnapi_uncaught_fn uncaught_fn;
   void *uncaught_opaque;
+  /* Native code entered from JavaScript or from the host and still running
+   * (Node-API callbacks, finalizers, module init). 0 means no JavaScript
+   * frame is below the current native code. */
+  uint32_t native_depth;
+  /* Open callback scopes of every env (Node: async_callback_scope_depth). */
+  uint32_t callback_scope_depth;
   bool destroying;
 };
 
@@ -239,6 +256,9 @@ struct napi_env__ {
   qn_list pending_finalizers;
   /* napi_deferred not concluded yet, released at teardown. */
   qn_list deferreds;
+  /* napi_async_context not destroyed yet, released at teardown. */
+  qn_list async_contexts;
+  uint32_t open_callback_scopes;
   bool destructing;
 };
 
@@ -408,6 +428,14 @@ QN_INTERNAL int qn_lifetime_init(qjsnapi_host *host);
 /* builtins.c: binary data, BigInt, Date and Promise support. */
 QN_INTERNAL int qn_builtins_init(qjsnapi_host *host);
 QN_INTERNAL void qn_env_free_deferreds(napi_env env);
+QN_INTERNAL int qn_buffer_init(qjsnapi_host *host);
+QN_INTERNAL void qn_env_free_async_contexts(napi_env env);
+/* Data and byte length of any ArrayBufferView (typed array or DataView);
+ * false for anything else. */
+QN_INTERNAL bool qn_view_data(napi_env env, JSValueConst value, void **data,
+                              size_t *length);
+/* Runs the pending promise jobs; exceptions go to the uncaught handler. */
+QN_INTERNAL void qn_microtask_checkpoint(qjsnapi_host *host);
 /* lifetime.c: runs `finalize_cb` (queued, as for napi_add_finalizer) once
  * `obj` is collected. Returns -1 with an exception pending on failure. */
 QN_INTERNAL int qn_attach_finalizer(napi_env env, JSValueConst obj,

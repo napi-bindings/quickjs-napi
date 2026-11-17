@@ -47,7 +47,9 @@ void qjsnapi_host_destroy(qjsnapi_host *host);
 /* Loads a `.node` shared library and runs its Node-API initializer.
  * On success returns 0 and stores a new reference to the exports object in
  * *exports. On failure returns -1 with a JS exception pending on the
- * context. Loading the same path twice returns the cached exports. */
+ * context. As with Node.js's process.dlopen, every call runs the addon's
+ * initializer again with a new env and returns new exports (caching is the
+ * module loader's job). */
 int qjsnapi_load_addon(qjsnapi_host *host, const char *path, JSValue *exports);
 
 /* Runs the initializer of an addon linked statically into the embedder, as
@@ -56,6 +58,16 @@ int qjsnapi_load_addon(qjsnapi_host *host, const char *path, JSValue *exports);
 int qjsnapi_init_static_addon(qjsnapi_host *host, const char *name,
                               napi_addon_register_func init,
                               int32_t module_api_version, JSValue *exports);
+
+/* The minimal Node.js Buffer constructor used by napi_create_buffer*
+ * (Buffer.from, alloc, toString, ...). The library does not install it as a
+ * global: the embedder decides where it is visible. Returns a new reference. */
+JSValue qjsnapi_host_get_buffer(qjsnapi_host *host);
+
+/* What napi_get_node_version reports: the Node.js release whose Node-API
+ * behaviour is reproduced, with release name "quickjs-napi". A host that
+ * provides `process` should report the same (process.version). */
+const napi_node_version *qjsnapi_node_version(void);
 
 /* Highest Node-API version supported by this build. */
 uint32_t qjsnapi_napi_version(void);

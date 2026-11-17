@@ -6,58 +6,13 @@
  * addons referencing them still load; calling one returns
  * napi_generic_failure with a descriptive napi_get_last_error_info().
  *
- * Implemented: 129 / 155 functions.
+ * Implemented: 141 / 155 functions.
  */
 #include "qjsnapi_internal.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_async_init(napi_env env, napi_value async_resource, napi_value async_resource_name, napi_async_context* result) {
-  return qn_not_implemented(env, "napi_async_init");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_async_destroy(napi_env env, napi_async_context async_context) {
-  return qn_not_implemented(env, "napi_async_destroy");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_make_callback(napi_env env, napi_async_context async_context, napi_value recv, napi_value func, size_t argc, const napi_value* argv, napi_value* result) {
-  return qn_not_implemented(env, "napi_make_callback");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_buffer(napi_env env, size_t length, void** data, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_buffer");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_external_buffer(napi_env env, size_t length, void* data, node_api_basic_finalize finalize_cb, void* finalize_hint, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_external_buffer");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-node_api_create_buffer_from_arraybuffer(napi_env env, napi_value arraybuffer, size_t byte_offset, size_t byte_length, napi_value* result) {
-  return qn_not_implemented(env, "node_api_create_buffer_from_arraybuffer");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_buffer_copy(napi_env env, size_t length, const void* data, void** result_data, napi_value* result) {
-  return qn_not_implemented(env, "napi_create_buffer_copy");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_is_buffer(napi_env env, napi_value value, bool* result) {
-  return qn_not_implemented(env, "napi_is_buffer");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_buffer_info(napi_env env, napi_value value, void** data, size_t* length) {
-  return qn_not_implemented(env, "napi_get_buffer_info");
-}
 
 NAPI_EXTERN napi_status NAPI_CDECL
 napi_create_async_work(napi_env env, napi_value async_resource, napi_value async_resource_name, napi_async_execute_callback execute, napi_async_complete_callback complete, void* data, napi_async_work* result) {
@@ -82,21 +37,6 @@ napi_cancel_async_work(node_api_basic_env env, napi_async_work work) {
 NAPI_EXTERN napi_status NAPI_CDECL
 napi_get_uv_event_loop(node_api_basic_env env, struct uv_loop_s** loop) {
   return qn_not_implemented(env, "napi_get_uv_event_loop");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_fatal_exception(napi_env env, napi_value err) {
-  return qn_not_implemented(env, "napi_fatal_exception");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_open_callback_scope(napi_env env, napi_value resource_object, napi_async_context context, napi_callback_scope* result) {
-  return qn_not_implemented(env, "napi_open_callback_scope");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_close_callback_scope(napi_env env, napi_callback_scope scope) {
-  return qn_not_implemented(env, "napi_close_callback_scope");
 }
 
 NAPI_EXTERN napi_status NAPI_CDECL

@@ -6,9 +6,10 @@
  * Runs the script as a CommonJS module (host/bootstrap.js): `require` loads
  * .js, .json and Node-API addons (.node), with Node.js resolution rules for
  * relative paths, directories and node_modules. Globals: `process` (subset),
- * `global`, `gc()`, timers (setTimeout, setInterval, setImmediate,
+ * `global`, `gc()`, `Buffer`, timers (setTimeout, setInterval, setImmediate,
  * queueMicrotask), plus the quickjs-libc helpers (console.log, print,
- * scriptArgs).
+ * scriptArgs). Builtin modules: module, timers, timers/promises, buffer,
+ * util, url, vm (minimal subsets, see host/bootstrap.js).
  *
  * Event loop (run_loop), one iteration:
  *   1. microtasks (promise jobs)
@@ -308,6 +309,28 @@ static JSValue native_write_stderr(JSContext *ctx, JSValueConst this_val,
   return JS_UNDEFINED;
 }
 
+/* vm.runInNewContext(code): evaluates `code` in a new context (realm) of the
+ * same runtime and returns the completion value. The context lives as long
+ * as the functions and objects created in it. */
+static JSValue native_run_in_new_context(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+  (void)this_val;
+  size_t len;
+  const char *code = arg_string(ctx, argc, argv, 0, &len);
+  if (!code) return JS_EXCEPTION;
+  JSContext *realm = JS_NewContext(JS_GetRuntime(ctx));
+  if (!realm) {
+    JS_FreeCString(ctx, code);
+    return JS_ThrowOutOfMemory(ctx);
+  }
+  JSValue r = JS_Eval(realm, code, len, "evalmachine.<anonymous>",
+                      JS_EVAL_TYPE_GLOBAL);
+  JS_FreeCString(ctx, code);
+  if (JS_IsException(r)) r = JS_Throw(ctx, JS_GetException(realm));
+  JS_FreeContext(realm);
+  return r;
+}
+
 static const char *platform_name(void) {
 #if defined(_WIN32)
   return "win32";
@@ -336,6 +359,14 @@ static JSValue make_natives(JSContext *ctx, int argc, char **argv) {
   set_fn(ctx, n, "cwd", native_cwd, 0);
   set_fn(ctx, n, "exit", native_exit, 1);
   set_fn(ctx, n, "writeStderr", native_write_stderr, 1);
+  set_fn(ctx, n, "runInNewContext", native_run_in_new_context, 1);
+  JS_SetPropertyStr(ctx, n, "Buffer",
+                    qjsnapi_host_get_buffer(qjsnapi_host_from_context(ctx)));
+  const napi_node_version *nv = qjsnapi_node_version();
+  char node_version[32];
+  snprintf(node_version, sizeof(node_version), "%u.%u.%u", nv->major,
+           nv->minor, nv->patch);
+  JS_SetPropertyStr(ctx, n, "nodeVersion", JS_NewString(ctx, node_version));
   JS_SetPropertyStr(ctx, n, "platform", JS_NewString(ctx, platform_name()));
   JS_SetPropertyStr(ctx, n, "quickjsVersion", JS_NewString(ctx, QJS_VERSION_STR));
   JS_SetPropertyStr(ctx, n, "napiVersion",
