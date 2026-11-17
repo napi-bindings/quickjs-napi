@@ -141,9 +141,29 @@ struct qjsnapi_host {
   JSValue weakmap_get;   /* WeakMap.prototype.get */
   JSValue weakmap_set;   /* WeakMap.prototype.set */
   JSValue holders;       /* WeakMap: target -> NapiHolder object */
+  /* Binary data, dates, BigInt (builtins.c): constructors and accessors
+   * captured from the pristine builtins, so that user code patching them
+   * cannot change what Node-API reports. */
+  JSValue arraybuffer_ctor;   /* ArrayBuffer */
+  JSValue dataview_ctor;      /* DataView */
+  JSValue dv_buffer;          /* get DataView.prototype.buffer */
+  JSValue dv_byte_length;     /* get DataView.prototype.byteLength */
+  JSValue dv_byte_offset;     /* get DataView.prototype.byteOffset */
+  JSValue ta_buffer;          /* get %TypedArray%.prototype.buffer */
+  JSValue ta_byte_length;     /* get %TypedArray%.prototype.byteLength */
+  JSValue date_get_time;      /* Date.prototype.getTime */
+  JSValue bigint_from_hex;    /* (negative, hex) => BigInt */
+  JSValue bigint_to_hex;      /* (bigint) => hex string, "-" when negative */
   qn_list envs;           /* napi_env__.link, in creation order */
   qn_list modules;        /* qn_module_record.link */
   int64_t external_memory; /* napi_adjust_external_memory counter */
+  /* Class IDs of builtin objects, found by probing instances at startup
+   * (QuickJS does not export its class ID enum). 0 when not available. */
+  JSClassID cid_arraybuffer;
+  JSClassID cid_shared_arraybuffer;
+  JSClassID cid_dataview;
+  JSClassID cid_date;
+  JSClassID cid_typed[12]; /* indexed by JSTypedArrayEnum */
   qjsnapi_uncaught_fn uncaught_fn;
   void *uncaught_opaque;
   bool destroying;
@@ -217,6 +237,8 @@ struct napi_env__ {
   /* Finalizers of collected targets, run at a point where JavaScript may
    * run (qjsnapi_host_run_finalizers), never from inside the GC. */
   qn_list pending_finalizers;
+  /* napi_deferred not concluded yet, released at teardown. */
+  qn_list deferreds;
   bool destructing;
 };
 
@@ -383,6 +405,14 @@ QN_INTERNAL JSValue qn_new_string_utf8(JSContext *ctx, const char *str,
 
 /* lifetime.c: classes, captured builtins and the holders WeakMap. */
 QN_INTERNAL int qn_lifetime_init(qjsnapi_host *host);
+/* builtins.c: binary data, BigInt, Date and Promise support. */
+QN_INTERNAL int qn_builtins_init(qjsnapi_host *host);
+QN_INTERNAL void qn_env_free_deferreds(napi_env env);
+/* lifetime.c: runs `finalize_cb` (queued, as for napi_add_finalizer) once
+ * `obj` is collected. Returns -1 with an exception pending on failure. */
+QN_INTERNAL int qn_attach_finalizer(napi_env env, JSValueConst obj,
+                                    napi_finalize finalize_cb, void *data,
+                                    void *hint);
 QN_INTERNAL bool qn_is_external(JSValueConst v);
 /* Teardown of the references of an env (Node: DrainFinalizerQueue, then
  * FinalizeAll(finalizing_reflist), then FinalizeAll(reflist)). */
