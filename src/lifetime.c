@@ -9,7 +9,11 @@
  *     symbol is held through a JS WeakRef: QuickJS reports a WeakRef target
  *     dead as soon as its refcount drops to zero, so napi_get_reference_value
  *     returns NULL exactly when the value is gone. Other primitives are
- *     released for good at count 0 (Node: persistent reset).
+ *     released for good at count 0 (Node: persistent reset). A target that
+ *     becomes weak is also kept alive until qjsnapi_host_clear_kept_objects
+ *     (end of the macrotask, gc()), as V8 keeps it until a GC: without this
+ *     an object created by a native call and referenced weakly would die
+ *     when the call's handle scope closes.
  *
  *   - Weak callback. V8 notifies a weak persistent when its target is
  *     collected; QuickJS has no such C hook. Every weakable target gets a
@@ -232,6 +236,37 @@ static void ref_reset(napi_ref ref) {
   JS_FreeValue(ctx, weak);
 }
 
+/* Adds `v` (whose reference the caller hands over) to the kept objects. On
+ * allocation failure the object is released at once: it is only kept alive
+ * for a shorter time. */
+static void keep_alive(qjsnapi_host *host, JSValue v) {
+  if (host->kept_len == host->kept_cap) {
+    size_t cap = host->kept_cap ? host->kept_cap * 2 : 16;
+    JSValue *a = (JSValue *)realloc(host->kept, cap * sizeof(JSValue));
+    if (a == NULL) {
+      JS_FreeValue(host->ctx, v);
+      return;
+    }
+    host->kept = a;
+    host->kept_cap = cap;
+  }
+  host->kept[host->kept_len++] = v;
+}
+
+void qjsnapi_host_clear_kept_objects(qjsnapi_host *host) {
+  if (host == NULL) return;
+  /* Freeing may run class finalizers that make other references weak, so
+   * the list is detached first and cleared until it stays empty. */
+  while (host->kept_len > 0) {
+    JSValue *a = host->kept;
+    size_t n = host->kept_len;
+    host->kept = NULL;
+    host->kept_len = host->kept_cap = 0;
+    for (size_t i = 0; i < n; i++) JS_FreeValue(host->ctx, a[i]);
+    free(a);
+  }
+}
+
 /* Node: Reference::SetWeak(). Returns -1 (exception pending) only when the
  * WeakRef cannot be allocated; the reference then stays strong. */
 static int ref_set_weak(napi_ref ref) {
@@ -244,7 +279,7 @@ static int ref_set_weak(napi_ref ref) {
     ref->weak = w;
     JSValue v = ref->value;
     ref->value = JS_UNDEFINED;
-    JS_FreeValue(ctx, v);
+    keep_alive(ref->env->host, v); /* takes over the reference held */
     return 0;
   }
   ref_reset(ref);
@@ -344,16 +379,15 @@ static void ref_delete(napi_ref ref) {
 /* Node: Reference::Finalize(). The target is gone (or the env is being torn
  * down): reset the value, unlink, run the user finalizer, and delete the
  * reference if the runtime owns it. A user-owned reference may be deleted by
- * its own finalizer, so it is not touched after the callback; at teardown it
- * is parked in env->orphan_refs first, so it is freed with the env when the
- * addon never deletes it (qn_env_free_orphan_refs). */
+ * its own finalizer, so it is not touched after the callback; it is parked
+ * in env->orphan_refs first, so it is freed with the env when the addon
+ * never deletes it (qn_env_free_orphan_refs; Node.js leaks it). */
 static void ref_finalize(napi_ref ref) {
   napi_env env = ref->env;
   if (!ref->tracker) ref_reset(ref);
   bool delete_me = ref->runtime_owned;
   unlink_if_linked(&ref->link);
-  if (!delete_me && env->destructing)
-    qn_list_add_tail(&ref->link, &env->orphan_refs);
+  if (!delete_me) qn_list_add_tail(&ref->link, &env->orphan_refs);
   ref_dequeue(ref);
   ref_detach_holder(ref);
   napi_finalize cb = ref->finalize_cb;

@@ -2,8 +2,12 @@
  * quickjs-napi host executable.
  *
  *   quickjs-napi [options] <script.js> [args...]
+ *   quickjs-napi [options] -e <code> [args...]
  *
- * Options (Node.js names):
+ * Options (Node.js names), also read from NODE_OPTIONS (where the options
+ * only Node.js knows are ignored):
+ *   -e, --eval <code>        run the code instead of a script
+ *   -r, --require <module>   load the module first (repeatable)
  *   --expose-gc   accepted; gc() is always available
  *   --force-node-api-uncaught-exceptions-policy[=true|false],
  *   --no-force-node-api-uncaught-exceptions-policy
@@ -15,7 +19,8 @@
  * `global`, `gc()`, `Buffer`, timers (setTimeout, setInterval, setImmediate,
  * queueMicrotask), plus the quickjs-libc helpers (console.log, print,
  * scriptArgs). Builtin modules: module, timers, timers/promises, buffer,
- * util, url, vm (minimal subsets, see host/bootstrap.js).
+ * util, url, vm, child_process (host/spawn.c), events (minimal subsets, see
+ * host/bootstrap.js).
  *
  * Event loop: the host's libuv loop (qjsnapi_host_get_loop), run with
  * uv_run until nothing referenced is left, then process 'beforeExit' (which
@@ -35,6 +40,11 @@
  * Node.js default `--unhandled-rejections=throw`), until both are empty.
  * An uncaught exception goes to process 'uncaughtException' listeners or
  * prints the error and exits with code 1, as in Node.js.
+ *
+ * Exit: at the end of the script the host is destroyed (cleanup hooks,
+ * finalizers, see qjsnapi_host_destroy). process.exit() and fatal
+ * exceptions end the process at once instead, without that teardown, as
+ * Node.js does.
  *
  * The executable exports every napi_* and uv_* symbol (see CMakeLists.txt):
  * addons built for Node.js resolve them from this process.
@@ -59,8 +69,20 @@
 
 #include <uv.h>
 
+#if defined(__SANITIZE_ADDRESS__)
+#define QN_LEAK_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define QN_LEAK_SANITIZER 1
+#endif
+#endif
+#ifndef QN_LEAK_SANITIZER
+#define QN_LEAK_SANITIZER 0
+#endif
+
 #include "bootstrap_js.h" /* generated: qn_bootstrap_js, qn_bootstrap_js_len */
 #include "qjsnapi.h"
+#include "spawn.h"
 #include "quickjs-libc.h"
 #include "quickjs.h"
 
@@ -69,6 +91,15 @@
 #endif
 
 static int g_exit_requested;
+/* -e / --eval: the code to run instead of a script, or NULL. */
+static const char *g_eval_code;
+/* -r / --require: modules loaded before the script (from the command line
+ * and NODE_OPTIONS), in order. */
+#define MAX_PRELOADS 16
+static const char *g_preloads[MAX_PRELOADS];
+static int g_preload_count;
+static char *g_node_options_copy; /* storage of the NODE_OPTIONS tokens */
+
 static int g_exit_code;
 /* Object returned by bootstrap.js: runMain, emitExit, emitBeforeExit,
  * runDueTimer, immediateCount, runImmediate, fatalException,
@@ -316,6 +347,8 @@ static JSValue js_gc(JSContext *ctx, JSValueConst this_val, int argc,
   (void)this_val;
   (void)argc;
   (void)argv;
+  /* V8's gc() collects the targets of weak handles at once. */
+  qjsnapi_host_clear_kept_objects(qjsnapi_host_from_context(ctx));
   JS_RunGC(JS_GetRuntime(ctx));
   JS_RunGC(JS_GetRuntime(ctx));
   return JS_UNDEFINED;
@@ -413,6 +446,31 @@ static int set_fn(JSContext *ctx, JSValueConst obj, const char *name,
   return JS_SetPropertyStr(ctx, obj, name, JS_NewCFunction(ctx, fn, name, length));
 }
 
+static void host_checkpoint(qjsnapi_host *host, JSContext *ctx, void *opaque);
+static void handle_uncaught(JSContext *ctx, JSValue exc);
+
+/* An event of a child process (spawn.c): a macrotask of its own. */
+static void dispatch_callback(JSContext *ctx, JSValueConst fn, int argc,
+                              JSValueConst *argv) {
+  if (g_exit_requested) return;
+  JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, argc, argv);
+  if (JS_IsException(r))
+    handle_uncaught(ctx, JS_GetException(ctx));
+  else
+    JS_FreeValue(ctx, r);
+  host_checkpoint(NULL, ctx, NULL);
+}
+
+#if defined(__APPLE__)
+#include <crt_externs.h>
+static char **host_environ(void) { return *_NSGetEnviron(); }
+#elif defined(_WIN32)
+static char **host_environ(void) { return _environ; }
+#else
+extern char **environ;
+static char **host_environ(void) { return environ; }
+#endif
+
 static JSValue make_natives(JSContext *ctx, int argc, char **argv) {
   JSValue n = JS_NewObject(ctx);
   if (JS_IsException(n)) return n;
@@ -427,6 +485,10 @@ static JSValue make_natives(JSContext *ctx, int argc, char **argv) {
   set_fn(ctx, n, "runInNewContext", native_run_in_new_context, 1);
   set_fn(ctx, n, "armTimer", native_arm_timer, 2);
   set_fn(ctx, n, "armImmediate", native_arm_immediate, 2);
+  if (spawn_add_natives(ctx, n, g_loop, dispatch_callback) < 0) {
+    JS_FreeValue(ctx, n);
+    return JS_EXCEPTION;
+  }
   JS_SetPropertyStr(ctx, n, "Buffer",
                     qjsnapi_host_get_buffer(qjsnapi_host_from_context(ctx)));
   const napi_node_version *nv = qjsnapi_node_version();
@@ -445,12 +507,29 @@ static JSValue make_natives(JSContext *ctx, int argc, char **argv) {
   JSValue args = JS_NewArray(ctx);
   JS_SetPropertyUint32(ctx, args, 0, JS_NewString(ctx, exec ? exec : argv[0]));
   free(exec);
-  char *script = real_path(argv[1]);
-  JS_SetPropertyUint32(ctx, args, 1, JS_NewString(ctx, script ? script : argv[1]));
-  free(script);
-  for (int i = 2; i < argc; i++)
+  /* With -e there is no script: argv[1...] are the arguments. */
+  int first_arg = 1;
+  if (!g_eval_code) {
+    char *script = real_path(argv[1]);
+    JS_SetPropertyUint32(ctx, args, 1,
+                         JS_NewString(ctx, script ? script : argv[1]));
+    free(script);
+    first_arg = 2;
+  }
+  for (int i = first_arg; i < argc; i++)
     JS_SetPropertyUint32(ctx, args, (uint32_t)i, JS_NewString(ctx, argv[i]));
   JS_SetPropertyStr(ctx, n, "argv", args);
+  /* process.env: the environment as "NAME=value" strings. */
+  JSValue env = JS_NewArray(ctx);
+  char **envp = host_environ();
+  for (uint32_t i = 0; envp && envp[i]; i++)
+    JS_SetPropertyUint32(ctx, env, i, JS_NewString(ctx, envp[i]));
+  JS_SetPropertyStr(ctx, n, "environ", env);
+  JSValue preloads = JS_NewArray(ctx);
+  for (int i = 0; i < g_preload_count; i++)
+    JS_SetPropertyUint32(ctx, preloads, (uint32_t)i,
+                         JS_NewString(ctx, g_preloads[i]));
+  JS_SetPropertyStr(ctx, n, "preloads", preloads);
   if (JS_HasException(ctx)) {
     JS_FreeValue(ctx, n);
     return JS_EXCEPTION;
@@ -586,6 +665,8 @@ static void host_checkpoint(qjsnapi_host *host, JSContext *ctx, void *opaque) {
     if (r > 0) continue;
     if (!process_rejections(ctx)) break;
   }
+  /* End of the macrotask (see qjsnapi_host_clear_kept_objects). */
+  qjsnapi_host_clear_kept_objects(qjsnapi_host_from_context(ctx));
   if (g_exit_requested) uv_stop(g_loop);
 }
 
@@ -655,8 +736,9 @@ static int run(JSContext *ctx, qjsnapi_host *host, int argc, char **argv) {
   qjsnapi_host_set_uncaught_handler(host, on_napi_uncaught, NULL);
   qjsnapi_host_set_checkpoint(host, host_checkpoint, NULL);
 
-  JSValue run_main = JS_GetPropertyStr(ctx, api, "runMain");
-  JSValue script = JS_NewString(ctx, argv[1]);
+  JSValue run_main =
+      JS_GetPropertyStr(ctx, api, g_eval_code ? "runEval" : "runMain");
+  JSValue script = JS_NewString(ctx, g_eval_code ? g_eval_code : argv[1]);
   JSValue r = JS_Call(ctx, run_main, JS_UNDEFINED, 1, &script);
   JS_FreeValue(ctx, script);
   JS_FreeValue(ctx, run_main);
@@ -709,27 +791,87 @@ static const char kForcePolicy[] = "--force-node-api-uncaught-exceptions-policy"
 static const char kNoForcePolicy[] =
     "--no-force-node-api-uncaught-exceptions-policy";
 
-/* Options before the script. Returns the index of the script in argv, or
- * -1 after printing an error. */
-static int parse_options(int argc, char **argv, int *force_policy) {
-  int i = 1;
-  for (; i < argc && strncmp(argv[i], "--", 2) == 0; i++) {
-    const char *opt = argv[i];
-    size_t n = strlen(kForcePolicy);
-    if (strcmp(opt, "--expose-gc") == 0 || strcmp(opt, "--expose_gc") == 0) {
-      continue; /* gc() is always available */
-    } else if (strcmp(opt, kNoForcePolicy) == 0) {
-      *force_policy = 0;
-    } else if (strncmp(opt, kForcePolicy, n) == 0 &&
-               (opt[n] == '\0' || strcmp(opt + n, "=true") == 0)) {
-      *force_policy = 1;
-    } else if (strncmp(opt, kForcePolicy, n) == 0 &&
-               strcmp(opt + n, "=false") == 0) {
-      *force_policy = 0;
-    } else {
-      fprintf(stderr, "%s: bad option: %s\n", argv[0], opt);
+
+/* Parses the option argv[*i] (and its value, advancing *i). Returns 1 when
+ * -e ends the options, 0 otherwise, -1 after printing an error. In
+ * NODE_OPTIONS, shared with Node.js, the options quickjs-napi does not know
+ * (--max-old-space-size, --use-openssl-ca, ...) and -e are ignored. */
+static int parse_option(int argc, char **argv, int *i, int *force_policy,
+                        bool from_env) {
+  const char *opt = argv[*i];
+  size_t n = strlen(kForcePolicy);
+  bool is_eval = strcmp(opt, "-e") == 0 || strcmp(opt, "--eval") == 0;
+  bool is_require = strcmp(opt, "-r") == 0 || strcmp(opt, "--require") == 0;
+  if ((is_eval && !from_env) || is_require) {
+    if (*i + 1 >= argc) {
+      fprintf(stderr, "quickjs-napi: %s requires an argument\n", opt);
       return -1;
     }
+    const char *value = argv[++*i];
+    if (is_eval) {
+      g_eval_code = value;
+      return 1;
+    }
+    opt = value;
+  } else if (strncmp(opt, "--require=", 10) == 0) {
+    opt += 10;
+    is_require = true;
+  }
+  if (is_require) {
+    if (g_preload_count == MAX_PRELOADS) {
+      fprintf(stderr, "quickjs-napi: too many --require options\n");
+      return -1;
+    }
+    g_preloads[g_preload_count++] = opt;
+  } else if (strcmp(opt, "--expose-gc") == 0 ||
+             strcmp(opt, "--expose_gc") == 0) {
+    /* gc() is always available */
+  } else if (strcmp(opt, kNoForcePolicy) == 0) {
+    *force_policy = 0;
+  } else if (strncmp(opt, kForcePolicy, n) == 0 &&
+             (opt[n] == '\0' || strcmp(opt + n, "=true") == 0)) {
+    *force_policy = 1;
+  } else if (strncmp(opt, kForcePolicy, n) == 0 &&
+             strcmp(opt + n, "=false") == 0) {
+    *force_policy = 0;
+  } else if (!from_env) {
+    fprintf(stderr, "quickjs-napi: bad option: %s\n", opt);
+    return -1;
+  }
+  return 0;
+}
+
+/* NODE_OPTIONS: options separated by spaces (no quoting), read before the
+ * command line. Returns -1 after printing an error. */
+static int parse_node_options(int *force_policy) {
+  const char *env = getenv("NODE_OPTIONS");
+  if (env == NULL || env[0] == '\0') return 0;
+  g_node_options_copy = strdup(env);
+  if (g_node_options_copy == NULL) return -1;
+  char *tokens[64];
+  int count = 0;
+  for (char *t = strtok(g_node_options_copy, " \t"); t;
+       t = strtok(NULL, " \t")) {
+    if (count == 64) {
+      fprintf(stderr, "quickjs-napi: NODE_OPTIONS has too many options\n");
+      return -1;
+    }
+    tokens[count++] = t;
+  }
+  for (int i = 0; i < count; i++)
+    if (parse_option(count, tokens, &i, force_policy, true) < 0) return -1;
+  return 0;
+}
+
+/* Options before the script. Returns the index of the script in argv (with
+ * -e: of the first argument), or -1 after printing an error. */
+static int parse_options(int argc, char **argv, int *force_policy) {
+  if (parse_node_options(force_policy) < 0) return -1;
+  int i = 1;
+  for (; i < argc && argv[i][0] == '-' && argv[i][1] != '\0'; i++) {
+    int r = parse_option(argc, argv, &i, force_policy, false);
+    if (r < 0) return -1;
+    if (r == 1) return i + 1; /* -e: what follows are the arguments */
   }
   return i;
 }
@@ -738,14 +880,15 @@ int main(int argc, char **argv) {
   int force_policy = 0;
   int script = parse_options(argc, argv, &force_policy);
   if (script < 0) return 9; /* Node.js: invalid command-line option */
-  if (script >= argc) {
+  if (script >= argc && !g_eval_code) {
     fprintf(stderr,
             "usage: %s [options] <script.js> [args...]\n"
             "quickjs-napi: Node-API %u for QuickJS %s\n",
             argv[0], qjsnapi_napi_version(), QJS_VERSION_STR);
     return 2;
   }
-  /* From here on argv is [executable, script, args...]. */
+  /* From here on argv is [executable, script, args...], or with -e
+   * [executable, args...]. */
   argv[script - 1] = argv[0];
   argv += script - 1;
   argc -= script - 1;
@@ -785,6 +928,25 @@ int main(int argc, char **argv) {
     JS_SetPropertyStr(ctx, global, "gc", js_gc_fn(ctx));
     JS_FreeValue(ctx, global);
     exit_code = run(ctx, host, argc, argv);
+    if (g_exit_requested) {
+      /* process.exit() and fatal exceptions: like Node.js
+       * (DefaultProcessExitHandlerInternal), the process ends without
+       * tearing the environment down. No cleanup hook or finalizer runs,
+       * work in the thread pool is not waited for (its completion callback
+       * would run with JavaScript disabled), only the thread pool is shut
+       * down. The 'exit' event has already been emitted. */
+      fflush(stdout);
+      fflush(stderr);
+      uv_library_shutdown();
+#if QN_LEAK_SANITIZER
+      /* What is left allocated is not freed by design (as in Node.js), so
+       * LeakSanitizer, which checks at exit(), is bypassed. */
+      _exit(exit_code);
+#else
+      exit(exit_code);
+#endif
+    }
+    spawn_close_all();
     close_host_handles();
     qjsnapi_host_destroy(host);
     g_loop = NULL;
@@ -793,5 +955,6 @@ int main(int argc, char **argv) {
   js_std_free_handlers(rt);
   JS_FreeContext(ctx);
   JS_FreeRuntime(rt);
+  free(g_node_options_copy);
   return exit_code;
 }

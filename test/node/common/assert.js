@@ -1,6 +1,8 @@
 'use strict';
-// Subset of Node.js `assert` (strict mode semantics) used by the vendored
-// js-native-api tests. Registered as the 'assert' builtin by ./index.js.
+// Subset of Node.js `assert` used by the vendored Node.js and node-addon-api
+// tests: strict comparisons, plus the legacy loose equal / notEqual
+// (deepEqual stays strict). Registered as the 'assert' builtin by ./index.js
+// and by the node-addon-api preload.
 
 class AssertionError extends Error {
   constructor(message) {
@@ -189,6 +191,28 @@ function match(string, regexp, message) {
   }
 }
 
+// Legacy (loose) assert.equal / notEqual: ==, with NaN equal to NaN.
+function equal(actual, expected, message) {
+  // eslint-disable-next-line eqeqeq
+  if (!(actual == expected || (actual !== actual && expected !== expected))) {
+    fail(message || `${inspect(actual)} == ${inspect(expected)}`);
+  }
+}
+
+function notEqual(actual, expected, message) {
+  // eslint-disable-next-line eqeqeq
+  if (actual == expected || (actual !== actual && expected !== expected)) {
+    fail(message || `${inspect(actual)} != ${inspect(expected)}`);
+  }
+}
+
+function ifError(value) {
+  if (value !== null && value !== undefined) {
+    if (value instanceof Error) throw value;
+    fail(`ifError got unwanted exception: ${inspect(value)}`);
+  }
+}
+
 function assert(value, message) { ok(value, message); }
 Object.assign(assert, {
   AssertionError,
@@ -196,8 +220,8 @@ Object.assign(assert, {
   fail,
   strictEqual,
   notStrictEqual,
-  equal: strictEqual,
-  notEqual: notStrictEqual,
+  equal,
+  notEqual,
   deepStrictEqual,
   notDeepStrictEqual,
   deepEqual: deepStrictEqual,
@@ -206,6 +230,7 @@ Object.assign(assert, {
   doesNotThrow,
   rejects,
   match,
+  ifError,
 });
 assert.strict = assert;
 

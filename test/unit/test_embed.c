@@ -76,8 +76,15 @@ static void check_lifetime(napi_env env, napi_value exports) {
   EXPECT(napi_create_reference(env, ext, 0, &weak) == napi_ok);
   EXPECT(napi_close_handle_scope(env, scope) == napi_ok);
 
-  /* The external is dead: the weak reference sees it at once ... */
-  napi_value v = (napi_value)(void *)0x1;
+  /* Like a V8 weak handle, the target survives until the kept objects are
+   * cleared (end of the macrotask, gc()) ... */
+  napi_value v = NULL;
+  EXPECT(napi_open_handle_scope(env, &scope) == napi_ok);
+  EXPECT(napi_get_reference_value(env, weak, &v) == napi_ok && v != NULL);
+  EXPECT(napi_close_handle_scope(env, scope) == napi_ok);
+  qjsnapi_host_clear_kept_objects(g_host);
+  /* ... then it is dead: the weak reference sees it at once ... */
+  v = (napi_value)(void *)0x1;
   EXPECT(napi_get_reference_value(env, weak, &v) == napi_ok && v == NULL);
   EXPECT(napi_delete_reference(env, weak) == napi_ok);
   /* ... but its finalizer only runs from the event loop, after a GC. */

@@ -38,14 +38,16 @@ void qn_env_free_async_contexts(napi_env env) {
 void qn_microtask_checkpoint(qjsnapi_host *host) {
   if (host->checkpoint_fn) {
     host->checkpoint_fn(host, host->ctx, host->checkpoint_opaque);
-    return;
+  } else {
+    for (;;) {
+      JSContext *job_ctx;
+      int r = JS_ExecutePendingJob(host->rt, &job_ctx);
+      if (r == 0) break;
+      if (r < 0) qn_report_uncaught(host, JS_GetException(job_ctx));
+    }
   }
-  for (;;) {
-    JSContext *job_ctx;
-    int r = JS_ExecutePendingJob(host->rt, &job_ctx);
-    if (r == 0) break;
-    if (r < 0) qn_report_uncaught(host, JS_GetException(job_ctx));
-  }
+  /* End of the macrotask: weak targets may go (see qjsnapi.h). */
+  qjsnapi_host_clear_kept_objects(host);
 }
 
 /* V8's ToObject fails, with a pending TypeError, only for undefined and

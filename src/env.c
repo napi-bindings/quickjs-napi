@@ -349,6 +349,7 @@ void qjsnapi_host_destroy(qjsnapi_host *host) {
     qn_env_cancel_works(QN_CONTAINER_OF(el, struct napi_env__, link));
   }
   qn_loop_drain(host);
+  qjsnapi_host_clear_kept_objects(host);
   /* 3. References and finalizers. */
   for (qn_list *el = host->envs.prev; el != &host->envs; el = el->prev) {
     qn_env_teardown(QN_CONTAINER_OF(el, struct napi_env__, link));
@@ -358,6 +359,7 @@ void qjsnapi_host_destroy(qjsnapi_host *host) {
     qn_env_free(QN_CONTAINER_OF(host->envs.prev, struct napi_env__, link));
   }
   qn_loop_close(host);
+  qjsnapi_host_clear_kept_objects(host);
   host_free_values(host);
   if (JS_GetContextOpaque(host->ctx) == host)
     JS_SetContextOpaque(host->ctx, NULL);

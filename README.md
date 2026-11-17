@@ -6,17 +6,21 @@ Node-API implementation for QuickJS (2026-06-04, from `../quickjs-build`).
 Addons built for Node.js (node-gyp, node-addon-api, napi-rs) are loaded
 unchanged: they resolve `napi_*` from the `quickjs-napi` executable.
 
-Status: milestone **M5** (M1 values, strings, objects, properties,
+Status: milestone **M6** in progress (M1 values, strings, objects, properties,
 functions, classes, errors; M2 references, externals, wrapping, finalizers,
 type tags, instance data, `napi_run_script`; M3 ArrayBuffer, TypedArray,
 DataView, BigInt, Date, Promise; M4 the synchronous `node_api.h`: Buffer,
 async context, `napi_make_callback`, callback scopes,
 `napi_fatal_exception`; M5 the libuv event loop: async work, thread-safe
-functions, async cleanup hooks, `napi_get_uv_event_loop`). All 155
-Node-API functions are implemented and pass 30 tests of the Node.js
-`js-native-api` suite and 19 of its `node-api` suite (see
-`test/node/README.md`). `NAPI_EXPERIMENTAL` APIs are not provided. See
-`PIANO-IMPLEMENTAZIONE.md` in the project for the plan.
+functions, async cleanup hooks, `napi_get_uv_event_loop`; M6 real-world
+conformance). All 155 Node-API functions are implemented and pass 30 tests
+of the Node.js `js-native-api` suite, 19 of its `node-api` suite (see
+`test/node/README.md`) and 78 of the 83 test modules of the node-addon-api
+8.9.2 suite (the others need `worker_threads`, `npm` or test the npm
+package itself), in its four binding variants (C++ exceptions, no exceptions,
+`Maybe`, custom namespace; see `test/node-addon-api/harness/README.md`).
+`NAPI_EXPERIMENTAL` APIs are not provided. See `PIANO-IMPLEMENTAZIONE.md`
+in the project for the plan.
 
 ## Lifetime model
 
@@ -24,6 +28,20 @@ Node-API functions are implemented and pass 30 tests of the Node.js
   count 0 an object, function or local symbol is held through a JS `WeakRef`
   (QuickJS reports the target dead as soon as its refcount drops to zero),
   other values are released.
+- V8 keeps the target of a weak handle until a garbage collection; QuickJS
+  frees an object when its refcount drops to zero, so an object created by
+  a native call and only referenced weakly would die when the call returns
+  (node-addon-api relies on the V8 behaviour: `Napi::Weak(Object::New(env))`
+  used later in the same synchronous code). When a reference becomes weak its
+  target is therefore also put on a list of *kept objects*, like the
+  `[[KeptAlive]]` list of ECMAScript WeakRefs, cleared at the end of every
+  macrotask (the library's checkpoint), by `gc()` and at teardown;
+  embedders call `qjsnapi_host_clear_kept_objects` at the end of their own
+  macrotasks.
+- `napi_define_class`: as with V8's prototype template, a later instance
+  property with the same key replaces an earlier one, whatever its
+  attributes (static properties are defined like `napi_define_properties`,
+  where such a redefinition fails, in Node.js too).
 - QuickJS has no weak callback in its C API. Each target of a reference, a
   wrap or a type tag gets a *holder* object in a `WeakMap` keyed by the
   target; QuickJS drops the entry of a dead key during `JS_RunGC`, and the
@@ -123,6 +141,11 @@ Node-API functions are implemented and pass 30 tests of the Node.js
   thread-safe function and async cleanup hook is done, then the reference
   finalizers with JavaScript disabled. Async work items and user references
   the addon never deleted are freed with the env (Node.js leaks them).
+- `process.exit()` and a fatal exception end the executable like Node.js
+  (`DefaultProcessExitHandlerInternal`): the `exit` event is emitted, the
+  thread pool is shut down, and the process exits without tearing the
+  environment down (no cleanup hook or finalizer runs, work in flight is not
+  waited for). A normal end of the script tears everything down as above.
 - `napi_fatal_error` prints `FATAL ERROR: <location> <message>` and aborts
   (`_exit(134)` on Windows, as Node.js).
 
@@ -178,6 +201,7 @@ Options:
 | `QJSNAPI_SANITIZE` | OFF | ASan + UBSan for everything, QuickJS included |
 | `QJSNAPI_TSAN` | OFF | ThreadSanitizer for everything (exclusive with `QJSNAPI_SANITIZE`) |
 | `QJSNAPI_BUILD_TESTS` | ON | test addons and CTest suite |
+| `QJSNAPI_NODE_ADDON_API_TESTS` | ON | the node-addon-api suite (8 C++ bindings, about 2 minutes of build) |
 
 `include/quickjs.h` and `include/quickjs-libc.h` must be identical to the
 ones in `quickjs-build`: configuration fails otherwise (JSValue ABI).
@@ -216,12 +240,18 @@ resolves the `napi_*` imports from the running executable.
 
 ```sh
 quickjs-napi [options] script.js [args...]
+quickjs-napi [options] -e <code> [args...]
 ```
 
-Options: `--force-node-api-uncaught-exceptions-policy[=true|false]` and
+Options: `-e`/`--eval <code>` (run the code instead of a script,
+`process.argv` is `[execPath, args...]`), `-r`/`--require <module>`
+(loaded before the script, repeatable),
+`--force-node-api-uncaught-exceptions-policy[=true|false]` and
 `--no-force-node-api-uncaught-exceptions-policy` (see above), `--expose-gc`
 (accepted and ignored: `gc()` is always defined). An unknown option exits
-with code 9, as Node.js.
+with code 9, as Node.js. `NODE_OPTIONS` is read first, with the same
+options separated by spaces; the options only Node.js knows are ignored
+there (the variable is shared with Node.js).
 
 The script runs as a CommonJS module (`host/bootstrap.js`): `require`
 loads `.js`, `.json` and `.node` files with Node.js resolution rules
@@ -233,7 +263,10 @@ loads `.js`, `.json` and `.node` files with Node.js resolution rules
 modules `timers` and `timers/promises`), `Buffer` (also `require('buffer')`),
 minimal builtin modules `util` (`promisify`, `types`), `url`
 (`pathToFileURL`, `fileURLToPath`) and `vm` (`runInNewContext`, a new realm
-of the same runtime), `process.version`, and the quickjs-libc helpers
+of the same runtime), `child_process` (`spawnSync` and `spawn` without a
+shell; stdio `pipe`, `inherit` or `ignore`, an asynchronous child's stdin is
+never a pipe), `events` (a minimal `EventEmitter`), `process.env` (the real
+environment), `process.version`, and the quickjs-libc helpers
 (`console.log`, `print`, `scriptArgs`). As in Node.js, an exception no
 frame catches (a timer, a microtask, a Node-API finalizer) goes to
 `process.on('uncaughtException')` or ends the process with exit code 1, and
@@ -248,7 +281,8 @@ The embedder runs the host's libuv loop (`uv_run`), which also runs the
 queued finalizers; it installs `qjsnapi_host_set_uncaught_handler` for
 exceptions thrown by native callbacks and may install
 `qjsnapi_host_set_checkpoint` to drain microtasks, rejections and its own
-timers after each one.
+timers after each one, and calls `qjsnapi_host_clear_kept_objects` at the
+end of each macrotask it runs itself and before an explicit GC.
 
 ## Layout
 
@@ -271,11 +305,14 @@ timers after each one.
 | `src/tsfn.c` | thread-safe functions |
 | `src/loader.c` | `.node` loading: `napi_register_module_v1`, API version, legacy `napi_module_register` |
 | `src/stubs_generated.c` | generated by `tools/gen_stubs.py`, do not edit (empty now: every function is implemented) |
-| `host/main.c`, `host/bootstrap.js` | the `quickjs-napi` executable: libuv event loop (timers, immediates, `beforeExit`), CommonJS loader, `process` (embedded at build time by `cmake/embed.cmake`), `buffer`, `util`, `url`, `vm` |
+| `host/main.c`, `host/bootstrap.js` | the `quickjs-napi` executable: options, libuv event loop (timers, immediates, `beforeExit`), CommonJS loader, `process` (embedded at build time by `cmake/embed.cmake`), `buffer`, `util`, `url`, `vm`, `child_process`, `events` |
+| `host/spawn.c` | child processes (`spawnSync` on a private loop, `spawn` on the main one) |
 | `test/addons`, `test/js` | our test addons; the JS tests also run under Node.js as reference |
 | `test/node` | Node.js conformance tests (vendored, see its README) |
+| `test/node-addon-api` | node-addon-api headers and test suite (vendored by `tools/sync_node_addon_api.py`); `harness/` is ours (see its README) |
+| `cmake/node_addon_api_tests.cmake` | builds the 8 node-addon-api test bindings, one CTest per test module |
 | `test/unit` | C embedding test (teardown order, scopes, error state, finalizer queue) |
-| `test/lsan.supp` | LeakSanitizer suppressions for leaks the Node.js tests make by design |
+| `test/lsan.supp` | LeakSanitizer suppressions for leaks the Node.js and node-addon-api tests make by design |
 | `cmake/expect_abort.cmake` | runs a Node.js test that must abort (`napi_fatal_error`) and checks its output |
 
 After implementing a function, run `python3 tools/gen_stubs.py` to drop its

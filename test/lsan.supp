@@ -1,12 +1,24 @@
-# LeakSanitizer suppressions for the vendored Node.js tests (QJSNAPI_SANITIZE).
+# LeakSanitizer suppressions for the vendored Node.js and node-addon-api tests
+# (QJSNAPI_SANITIZE).
 #
-# Only memory that a Node.js test leaks by design, in addon code, belongs
-# here. References and async work items the addon never deletes are freed
-# with the env (qn_env_free_orphan_refs, qn_env_free_works), so they need no
-# entry; Node.js leaks them.
+# Only memory that a test leaks by design, in addon code, belongs here.
+# References and async work items the addon never deletes are freed with the
+# env (qn_env_free_orphan_refs, qn_env_free_works), so they need no entry;
+# Node.js leaks them.
 
 # node-api/test_env_teardown_gc/binding.c: MyObject_fini runs at teardown,
 # when JavaScript can no longer run; napi_get_named_property fails (as in
 # Node.js) and NODE_API_CALL_RETURN_VOID returns before freeing the
 # malloc'ed MyObject.
 leak:test_env_teardown_gc/binding.c
+
+# node-addon-api test addons (test/node-addon-api/test), leaks of the tests
+# or of node-addon-api itself, as under Node.js:
+# - `new` without delete in the test code.
+leak:node-addon-api/test/basic_types/boolean.cc
+leak:node-addon-api/test/function_reference.cc
+leak:node-addon-api/test/object/object.cc
+# - Napi::ThreadSafeFunction: the CallbackWrapper of a call is deleted only
+#   by CallJS after the callback returns normally, never when the function
+#   is closing (call_js_cb with a NULL env) or the callback throws.
+leak:node-addon-api/test/threadsafe_function/
