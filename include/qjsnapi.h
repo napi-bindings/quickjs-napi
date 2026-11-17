@@ -13,10 +13,16 @@
  *       // a JS exception is pending on ctx
  *     }
  *     ...
+ *     uv_run(qjsnapi_host_get_loop(host), UV_RUN_DEFAULT);
  *     JS_FreeValue(ctx, exports);
- *     qjsnapi_host_destroy(host);  // runs cleanup hooks and finalizers
+ *     qjsnapi_host_destroy(host);  // cleanup hooks, pending work, finalizers
  *     JS_FreeContext(ctx);
  *     JS_FreeRuntime(rt);
+ *
+ * The host is bound to a libuv loop (napi_get_uv_event_loop, async work,
+ * thread-safe functions, the finalizer queue). The embedder runs that loop;
+ * the library only adds its handles to it. Link with libuv (uv_a) and, for
+ * addons, export the uv_* symbols like the napi_* ones.
  */
 #ifndef QJSNAPI_H
 #define QJSNAPI_H
@@ -31,17 +37,31 @@ extern "C" {
 #endif
 
 typedef struct qjsnapi_host qjsnapi_host;
+struct uv_loop_s;
 
 /* Creates the Node-API host for `ctx` and stores it as the context opaque
- * pointer. Returns NULL on failure (a JS exception may be pending). */
+ * pointer, with a libuv loop of its own (closed by qjsnapi_host_destroy).
+ * Returns NULL on failure (a JS exception may be pending). */
 qjsnapi_host *qjsnapi_host_create(JSContext *ctx);
+
+/* Same, on the embedder's loop, which must outlive the host. The loop runs
+ * on the thread that owns `ctx`. */
+qjsnapi_host *qjsnapi_host_create_with_loop(JSContext *ctx,
+                                            struct uv_loop_s *loop);
+
+/* The loop napi_get_uv_event_loop returns. */
+struct uv_loop_s *qjsnapi_host_get_loop(qjsnapi_host *host);
 
 /* Returns the host attached to `ctx`, or NULL. */
 qjsnapi_host *qjsnapi_host_from_context(JSContext *ctx);
 
-/* Tears down every env (cleanup hooks LIFO, instance data finalizers),
- * releases the module cache and detaches the host from the context. Must be
- * called before JS_FreeContext(). No JavaScript may run afterwards. */
+/* Tears down every env, as Node.js does at exit, with JavaScript disabled:
+ * cleanup hooks LIFO (thread-safe functions close, async cleanup hooks
+ * start), queued async work cancelled, then the loop runs until in-flight
+ * work, thread-safe functions and async cleanup hooks are done; then
+ * references and instance data are finalized, the module cache is released
+ * and the host is detached from the context. The embedder closes its own
+ * handles on the loop first. Must be called before JS_FreeContext(). */
 void qjsnapi_host_destroy(qjsnapi_host *host);
 
 /* Loads a `.node` shared library and runs its Node-API initializer.
@@ -96,6 +116,24 @@ typedef void (*qjsnapi_uncaught_fn)(qjsnapi_host *host, JSContext *ctx,
                                     JSValue exception, void *opaque);
 void qjsnapi_host_set_uncaught_handler(qjsnapi_host *host,
                                        qjsnapi_uncaught_fn fn, void *opaque);
+
+/* Called after native code entered from the loop (async work completion,
+ * thread-safe function calls, finalizers) and when the outermost callback
+ * scope closes with no JavaScript below it: the place where Node.js runs its
+ * tick and microtask queues and reports unhandled rejections. The default
+ * runs the pending promise jobs (JS_ExecutePendingJob), reporting their
+ * exceptions to the uncaught handler. */
+typedef void (*qjsnapi_checkpoint_fn)(qjsnapi_host *host, JSContext *ctx,
+                                      void *opaque);
+void qjsnapi_host_set_checkpoint(qjsnapi_host *host, qjsnapi_checkpoint_fn fn,
+                                 void *opaque);
+
+/* Node's --force-node-api-uncaught-exceptions-policy (default off): when off,
+ * an exception thrown by a thread-safe function callback of an addon built
+ * for Node-API < 10 becomes a DEP0168 deprecation warning instead of an
+ * uncaught exception. */
+void qjsnapi_host_set_force_uncaught_exceptions_policy(qjsnapi_host *host,
+                                                       int force);
 
 #ifdef __cplusplus
 }

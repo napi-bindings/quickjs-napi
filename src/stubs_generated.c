@@ -6,7 +6,7 @@
  * addons referencing them still load; calling one returns
  * napi_generic_failure with a descriptive napi_get_last_error_info().
  *
- * Implemented: 141 / 155 functions.
+ * Implemented: 155 / 155 functions.
  */
 #include "qjsnapi_internal.h"
 
@@ -14,72 +14,5 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
 
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_async_work(napi_env env, napi_value async_resource, napi_value async_resource_name, napi_async_execute_callback execute, napi_async_complete_callback complete, void* data, napi_async_work* result) {
-  return qn_not_implemented(env, "napi_create_async_work");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_delete_async_work(napi_env env, napi_async_work work) {
-  return qn_not_implemented(env, "napi_delete_async_work");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_queue_async_work(node_api_basic_env env, napi_async_work work) {
-  return qn_not_implemented(env, "napi_queue_async_work");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_cancel_async_work(node_api_basic_env env, napi_async_work work) {
-  return qn_not_implemented(env, "napi_cancel_async_work");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_uv_event_loop(node_api_basic_env env, struct uv_loop_s** loop) {
-  return qn_not_implemented(env, "napi_get_uv_event_loop");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_create_threadsafe_function(napi_env env, napi_value func, napi_value async_resource, napi_value async_resource_name, size_t max_queue_size, size_t initial_thread_count, void* thread_finalize_data, napi_finalize thread_finalize_cb, void* context, napi_threadsafe_function_call_js call_js_cb, napi_threadsafe_function* result) {
-  return qn_not_implemented(env, "napi_create_threadsafe_function");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_get_threadsafe_function_context(napi_threadsafe_function func, void** result) {
-  return qn_not_implemented(NULL, "napi_get_threadsafe_function_context");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_call_threadsafe_function(napi_threadsafe_function func, void* data, napi_threadsafe_function_call_mode is_blocking) {
-  return qn_not_implemented(NULL, "napi_call_threadsafe_function");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_acquire_threadsafe_function(napi_threadsafe_function func) {
-  return qn_not_implemented(NULL, "napi_acquire_threadsafe_function");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_release_threadsafe_function(napi_threadsafe_function func, napi_threadsafe_function_release_mode mode) {
-  return qn_not_implemented(NULL, "napi_release_threadsafe_function");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_unref_threadsafe_function(node_api_basic_env env, napi_threadsafe_function func) {
-  return qn_not_implemented(env, "napi_unref_threadsafe_function");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_ref_threadsafe_function(node_api_basic_env env, napi_threadsafe_function func) {
-  return qn_not_implemented(env, "napi_ref_threadsafe_function");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_add_async_cleanup_hook(node_api_basic_env env, napi_async_cleanup_hook hook, void* arg, napi_async_cleanup_hook_handle* remove_handle) {
-  return qn_not_implemented(env, "napi_add_async_cleanup_hook");
-}
-
-NAPI_EXTERN napi_status NAPI_CDECL
-napi_remove_async_cleanup_hook(napi_async_cleanup_hook_handle remove_handle) {
-  return qn_not_implemented(NULL, "napi_remove_async_cleanup_hook");
-}
+/* Every Node-API function is implemented. */
+typedef int qn_stubs_generated_empty;

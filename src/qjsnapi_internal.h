@@ -19,6 +19,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <uv.h>
+
 #include "quickjs.h"
 #include "node_api.h"
 #include "qjsnapi.h"
@@ -100,8 +102,16 @@ typedef struct qn_arena {
 /* Host (one per JSContext) and env (one per loaded addon)                  */
 /* ------------------------------------------------------------------------ */
 
+/* One entry of env->cleanup_hooks, run LIFO at teardown. */
+typedef enum {
+  QN_HOOK_USER,     /* napi_add_env_cleanup_hook: fun(arg) */
+  QN_HOOK_ASYNC,    /* napi_add_async_cleanup_hook: arg is the handle */
+  QN_HOOK_INTERNAL, /* library (thread-safe functions): fun(arg) */
+} qn_hook_kind;
+
 typedef struct qn_cleanup_hook {
   qn_list link;
+  qn_hook_kind kind;
   napi_cleanup_hook fun;
   void *arg;
 } qn_cleanup_hook;
@@ -183,6 +193,25 @@ struct qjsnapi_host {
   uint32_t native_depth;
   /* Open callback scopes of every env (Node: async_callback_scope_depth). */
   uint32_t callback_scope_depth;
+  /* Event loop (loop.c). `loop` is own_loop unless the embedder gave one. */
+  uv_loop_t *loop;
+  uv_loop_t own_loop;
+  bool owns_loop;
+  /* Queued finalizers run from the loop: the check handle (unreferenced)
+   * runs them, the idle handle is active while some are queued (keeps the
+   * loop alive and stops it from blocking; Node: a SetImmediate). */
+  uv_check_t finalizer_check;
+  uv_idle_t finalizer_idle;
+  bool finalizer_handles;
+  qjsnapi_checkpoint_fn checkpoint_fn;
+  void *checkpoint_opaque;
+  /* --force-node-api-uncaught-exceptions-policy */
+  bool force_uncaught_policy;
+  bool dep0168_emitted;
+  /* Work the teardown waits for (uv_run until all are 0). */
+  uint32_t active_works;          /* async work queued, not completed */
+  uint32_t live_tsfns;            /* thread-safe functions not finalized */
+  uint32_t running_async_cleanup; /* async cleanup hooks started, not removed */
   bool destroying;
 };
 
@@ -210,7 +239,7 @@ typedef struct qn_holder {
  * are never collected anyway, so they stay strong (`keep_strong`), which is
  * what Node.js observably does. */
 struct napi_ref__ {
-  qn_list link;        /* env->reflist or env->finalizing_reflist */
+  qn_list link; /* env->reflist, env->finalizing_reflist or env->orphan_refs */
   qn_list holder_link; /* holder->refs while holder != NULL */
   qn_list queue_link;  /* env->pending_finalizers while queued */
   napi_env env;
@@ -258,6 +287,9 @@ struct napi_env__ {
   qn_list deferreds;
   /* napi_async_context not destroyed yet, released at teardown. */
   qn_list async_contexts;
+  /* napi_async_work queued and not completed (cancelled at teardown). */
+  qn_list works;       /* napi_async_work items not deleted yet */
+  qn_list orphan_refs; /* user references finalized at teardown */
   uint32_t open_callback_scopes;
   bool destructing;
 };
@@ -434,8 +466,48 @@ QN_INTERNAL void qn_env_free_async_contexts(napi_env env);
  * false for anything else. */
 QN_INTERNAL bool qn_view_data(napi_env env, JSValueConst value, void **data,
                               size_t *length);
-/* Runs the pending promise jobs; exceptions go to the uncaught handler. */
+/* Runs the pending promise jobs (or the embedder's checkpoint); exceptions
+ * go to the uncaught handler. */
 QN_INTERNAL void qn_microtask_checkpoint(qjsnapi_host *host);
+
+/* Native code called from the event loop, with no JavaScript below it
+ * (async work completion, thread-safe function calls and finalizers): a
+ * handle scope and a callback scope around the call; an exception left
+ * pending is reported as uncaught (Node: CallbackIntoModule), and the
+ * outermost scope ends with a microtask checkpoint. */
+typedef struct qn_callback_frame {
+  qn_scope *scope;
+  uint32_t open_handle_scopes;
+} qn_callback_frame;
+QN_INTERNAL void qn_callback_enter(napi_env env, qn_callback_frame *frame);
+/* enforce_policy: Node's enforceUncaughtExceptionPolicy. When false and the
+ * module targets Node-API < 10, an exception becomes a DEP0168 warning
+ * unless the host forces the policy. */
+QN_INTERNAL void qn_callback_leave(napi_env env, qn_callback_frame *frame,
+                                   bool enforce_policy);
+QN_INTERNAL void qn_report_callback_exception(napi_env env, JSValue exc,
+                                              bool enforce_policy);
+
+/* Event loop (loop.c). */
+QN_INTERNAL int qn_loop_init(qjsnapi_host *host, uv_loop_t *loop);
+QN_INTERNAL void qn_loop_schedule_finalizers(qjsnapi_host *host);
+/* Teardown: runs the loop until async work, thread-safe functions and async
+ * cleanup hooks are done, then (later) closes the loop. */
+QN_INTERNAL void qn_loop_drain(qjsnapi_host *host);
+QN_INTERNAL void qn_loop_close(qjsnapi_host *host);
+QN_INTERNAL void qn_env_cancel_works(napi_env env);
+/* qn_env_free: release what the addon never deleted. Node.js leaks these
+ * (undeleted async work items, user references); here they are freed with
+ * the env, after which no addon code can reach them. */
+QN_INTERNAL void qn_env_free_works(napi_env env);
+QN_INTERNAL void qn_env_free_orphan_refs(napi_env env);
+QN_INTERNAL void qn_env_run_cleanup_hooks(napi_env env);
+QN_INTERNAL bool qn_cleanup_hook_add(napi_env env, qn_hook_kind kind,
+                                     napi_cleanup_hook fun, void *arg,
+                                     qn_cleanup_hook **entry);
+QN_INTERNAL void qn_call_finalizer_policy(napi_env env, napi_finalize cb,
+                                          void *data, void *hint,
+                                          bool enforce_policy);
 /* lifetime.c: runs `finalize_cb` (queued, as for napi_add_finalizer) once
  * `obj` is collected. Returns -1 with an exception pending on failure. */
 QN_INTERNAL int qn_attach_finalizer(napi_env env, JSValueConst obj,

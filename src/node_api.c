@@ -12,6 +12,7 @@
  * Node-API callback called from JavaScript (the common case), nothing runs
  * early, exactly like Node.js, where the caller's own scope is still open.
  */
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "qjsnapi_internal.h"
@@ -35,6 +36,10 @@ void qn_env_free_async_contexts(napi_env env) {
 }
 
 void qn_microtask_checkpoint(qjsnapi_host *host) {
+  if (host->checkpoint_fn) {
+    host->checkpoint_fn(host, host->ctx, host->checkpoint_opaque);
+    return;
+  }
   for (;;) {
     JSContext *job_ctx;
     int r = JS_ExecutePendingJob(host->rt, &job_ctx);
@@ -55,6 +60,35 @@ static void callback_scope_enter(napi_env env) {
   env->host->callback_scope_depth++;
 }
 
+/* Node: ProcessEmitDeprecationWarning, once per code. */
+static void emit_dep0168(qjsnapi_host *host) {
+  if (host->dep0168_emitted) return;
+  host->dep0168_emitted = true;
+  fprintf(stderr,
+          "(quickjs-napi:%d) [DEP0168] DeprecationWarning: Uncaught Node-API "
+          "callback exception detected, please run with option "
+          "--force-node-api-uncaught-exceptions-policy=true to handle those "
+          "exceptions properly.\n",
+          (int)uv_os_getpid());
+}
+
+/* Node: the exception handler of node_napi_env__::CallbackIntoModule. */
+void qn_report_callback_exception(napi_env env, JSValue exc,
+                                  bool enforce_policy) {
+  qjsnapi_host *host = env->host;
+  if (!env->can_call_into_js) { /* terminatedOrTerminating() */
+    JS_FreeValue(env->ctx, exc);
+    return;
+  }
+  if (!enforce_policy && env->module_api_version < 10 &&
+      !host->force_uncaught_policy) {
+    JS_FreeValue(env->ctx, exc);
+    emit_dep0168(host);
+    return;
+  }
+  qn_report_uncaught(host, exc);
+}
+
 /* Node: InternalCallbackScope::Close. */
 static void callback_scope_leave(napi_env env) {
   qjsnapi_host *host = env->host;
@@ -63,6 +97,28 @@ static void callback_scope_leave(napi_env env) {
       env->can_call_into_js && !JS_HasException(env->ctx)) {
     qn_microtask_checkpoint(host);
   }
+}
+
+void qn_callback_enter(napi_env env, qn_callback_frame *frame) {
+  frame->scope = qn_scope_open(env, false);
+  frame->open_handle_scopes = env->open_handle_scopes;
+  callback_scope_enter(env);
+  env->host->native_depth++;
+  qn_clear_last_error(env); /* Node: CallIntoModule */
+}
+
+void qn_callback_leave(napi_env env, qn_callback_frame *frame,
+                       bool enforce_policy) {
+  env->host->native_depth--;
+  if (env->open_handle_scopes != frame->open_handle_scopes) {
+    napi_fatal_error("qn_callback_leave", NAPI_AUTO_LENGTH,
+                     "a callback left a handle scope open", NAPI_AUTO_LENGTH);
+  }
+  if (JS_HasException(env->ctx))
+    qn_report_callback_exception(env, JS_GetException(env->ctx),
+                                 enforce_policy);
+  if (frame->scope) qn_scope_close(env, frame->scope);
+  callback_scope_leave(env);
 }
 
 NAPI_EXTERN napi_status NAPI_CDECL napi_async_init(

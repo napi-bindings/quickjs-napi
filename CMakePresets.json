@@ -73,6 +73,14 @@
       "cacheVariables": {
         "QJSNAPI_SANITIZE": "ON"
       }
+    },
+    {
+      "name": "unix-tsan",
+      "displayName": "Linux/macOS - Debug + ThreadSanitizer",
+      "inherits": "unix-debug",
+      "cacheVariables": {
+        "QJSNAPI_TSAN": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -95,6 +103,10 @@
     {
       "name": "unix-asan",
       "configurePreset": "unix-asan"
+    },
+    {
+      "name": "unix-tsan",
+      "configurePreset": "unix-tsan"
     }
   ],
   "testPresets": [
@@ -129,6 +141,11 @@
       "name": "unix-asan",
       "inherits": "test-base",
       "configurePreset": "unix-asan"
+    },
+    {
+      "name": "unix-tsan",
+      "inherits": "test-base",
+      "configurePreset": "unix-tsan"
     }
   ]
 }

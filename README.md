@@ -6,17 +6,16 @@ Node-API implementation for QuickJS (2026-06-04, from `../quickjs-build`).
 Addons built for Node.js (node-gyp, node-addon-api, napi-rs) are loaded
 unchanged: they resolve `napi_*` from the `quickjs-napi` executable.
 
-Status: milestone **M4** (M1 values, strings, objects, properties,
+Status: milestone **M5** (M1 values, strings, objects, properties,
 functions, classes, errors; M2 references, externals, wrapping, finalizers,
 type tags, instance data, `napi_run_script`; M3 ArrayBuffer, TypedArray,
 DataView, BigInt, Date, Promise; M4 the synchronous `node_api.h`: Buffer,
 async context, `napi_make_callback`, callback scopes,
-`napi_fatal_exception`). 141 of 155 Node-API functions are implemented and
-pass 30 tests of the Node.js `js-native-api` suite and 10 of its `node-api`
-suite (see
-`test/node/README.md`); the others exist as generated stubs that return
-`napi_generic_failure` with a "not implemented yet" message, so that every
-addon still loads. `NAPI_EXPERIMENTAL` APIs are not provided. See
+`napi_fatal_exception`; M5 the libuv event loop: async work, thread-safe
+functions, async cleanup hooks, `napi_get_uv_event_loop`). All 155
+Node-API functions are implemented and pass 30 tests of the Node.js
+`js-native-api` suite and 19 of its `node-api` suite (see
+`test/node/README.md`). `NAPI_EXPERIMENTAL` APIs are not provided. See
 `PIANO-IMPLEMENTAZIONE.md` in the project for the plan.
 
 ## Lifetime model
@@ -92,8 +91,40 @@ addon still loads. `NAPI_EXPERIMENTAL` APIs are not provided. See
 - Deviation: `node_api_create_buffer_from_arraybuffer` with an
   out-of-range offset + length returns `napi_pending_exception`; Node.js
   returns `napi_ok` with the RangeError pending and no result.
-- Not yet (M5, with the libuv event loop): async work, thread-safe
-  functions, async cleanup hooks, `napi_get_uv_event_loop`.
+
+## Event loop, async work, thread-safe functions
+
+- The host runs on a libuv loop (v1.51.0, built statically and linked
+  into the executable, whose `uv_*` symbols are exported like `napi_*`, so
+  addons that use libuv directly load too). `qjsnapi_host_create` owns a
+  loop; `qjsnapi_host_create_with_loop` uses the embedder's.
+  `napi_get_uv_event_loop` returns it.
+- Finalizers queued by the GC run from a `uv_check` handle of the library
+  (an idle handle keeps the loop alive while some are queued), each followed
+  by a checkpoint: microtasks by default, or the embedder's
+  (`qjsnapi_host_set_checkpoint`).
+- Async work runs `execute` on libuv's thread pool (`UV_THREADPOOL_SIZE`
+  applies) and `complete` on the loop thread. `napi_cancel_async_work` maps
+  to `uv_cancel`. A work item deleted while queued is freed after its
+  completion (Node.js: undefined behaviour).
+- Thread-safe functions are a port of Node's `ThreadSafeFunction`: mutex,
+  bounded queue with a condition variable, `uv_async_t` dispatch of at most
+  1000 calls per iteration, `napi_tsfn_abort`, ref/unref of the handle, and
+  closing at env teardown (an internal cleanup hook) with `call_js_cb(env =
+  NULL)` for the items still queued.
+- An exception thrown by `complete`, `call_js_cb` or a finalizer goes to
+  `process.on('uncaughtException')`. For thread-safe functions of an addon
+  built with `NAPI_VERSION` < 10 it is dropped with a DEP0168 warning, as in
+  Node.js, unless `--force-node-api-uncaught-exceptions-policy` is given
+  (`qjsnapi_host_set_force_uncaught_exceptions_policy`).
+- Teardown (`qjsnapi_host_destroy`) mirrors Node's: cleanup hooks newest
+  first (env and async ones, thread-safe functions closed there), queued
+  work cancelled, the loop run until every in-flight work item, closing
+  thread-safe function and async cleanup hook is done, then the reference
+  finalizers with JavaScript disabled. Async work items and user references
+  the addon never deleted are freed with the env (Node.js leaks them).
+- `napi_fatal_error` prints `FATAL ERROR: <location> <message>` and aborts
+  (`_exit(134)` on Windows, as Node.js).
 
 ## Build
 
@@ -107,6 +138,7 @@ builds in `build/<preset>`:
 | `unix-debug` | Linux/macOS, Debug (QuickJS leak assertion at `JS_FreeRuntime`) |
 | `unix-release` | Linux/macOS, Release |
 | `unix-asan` | Linux/macOS, Debug + ASan/UBSan, QuickJS included |
+| `unix-tsan` | Linux/macOS, Debug + ThreadSanitizer, QuickJS and libuv included |
 | `windows-zig-debug`, `windows-zig-release` | Windows x64 with `zig cc` (see below) |
 
 ```sh
@@ -129,9 +161,13 @@ ctest --test-dir build --output-on-failure
 ```
 
 CI (`.github/workflows/ci.yml`) runs gcc Debug/Release, clang, gcc with
-ASan/UBSan and macOS arm64 with the `unix-*` presets, and Windows x64 with
-the `windows-zig-*` presets; the Linux and macOS jobs also run the
-`node_parity_*` tests under Node.js 22.
+ASan/UBSan, gcc with ThreadSanitizer and macOS arm64 with the `unix-*`
+presets, and Windows x64 with the `windows-zig-*` presets; the Linux and
+macOS jobs without sanitizers also run the `node_parity_*` tests under
+Node.js 22.
+
+libuv is fetched at configure time (`FetchContent`, tag v1.51.0). To build
+offline, pass `-DFETCHCONTENT_SOURCE_DIR_LIBUV=<libuv checkout>`.
 
 Options:
 
@@ -140,8 +176,8 @@ Options:
 | `QJSNAPI_QUICKJS_DIR` | `../quickjs-build` | QuickJS sources, built as a subproject |
 | `QJSNAPI_QUICKJS_LIBRARY` | empty | prebuilt `libqjs.a` when the sources are not available |
 | `QJSNAPI_SANITIZE` | OFF | ASan + UBSan for everything, QuickJS included |
+| `QJSNAPI_TSAN` | OFF | ThreadSanitizer for everything (exclusive with `QJSNAPI_SANITIZE`) |
 | `QJSNAPI_BUILD_TESTS` | ON | test addons and CTest suite |
-| `QJSNAPI_LIBUV` | OFF | event loop (milestone M5, not available yet) |
 
 `include/quickjs.h` and `include/quickjs-libc.h` must be identical to the
 ones in `quickjs-build`: configuration fails otherwise (JSValue ABI).
@@ -179,8 +215,13 @@ resolves the `napi_*` imports from the running executable.
 ## Usage
 
 ```sh
-quickjs-napi script.js [args...]
+quickjs-napi [options] script.js [args...]
 ```
+
+Options: `--force-node-api-uncaught-exceptions-policy[=true|false]` and
+`--no-force-node-api-uncaught-exceptions-policy` (see above), `--expose-gc`
+(accepted and ignored: `gc()` is always defined). An unknown option exits
+with code 9, as Node.js.
 
 The script runs as a CommonJS module (`host/bootstrap.js`): `require`
 loads `.js`, `.json` and `.node` files with Node.js resolution rules
@@ -200,10 +241,14 @@ an unhandled promise rejection is treated the same way. ES modules and
 package `exports` maps are not supported yet.
 
 Embedding: see `include/qjsnapi.h`
-(`qjsnapi_host_create`, `qjsnapi_load_addon`, `qjsnapi_init_static_addon`,
-`qjsnapi_host_get_buffer`, `qjsnapi_node_version`, `qjsnapi_host_destroy`). An embedder's event loop calls
-`qjsnapi_host_run_finalizers` once per iteration and installs
-`qjsnapi_host_set_uncaught_handler` for exceptions thrown by finalizers.
+(`qjsnapi_host_create`, `qjsnapi_host_create_with_loop`,
+`qjsnapi_host_get_loop`, `qjsnapi_load_addon`, `qjsnapi_init_static_addon`,
+`qjsnapi_host_get_buffer`, `qjsnapi_node_version`, `qjsnapi_host_destroy`).
+The embedder runs the host's libuv loop (`uv_run`), which also runs the
+queued finalizers; it installs `qjsnapi_host_set_uncaught_handler` for
+exceptions thrown by native callbacks and may install
+`qjsnapi_host_set_checkpoint` to drain microtasks, rejections and its own
+timers after each one.
 
 ## Layout
 
@@ -220,14 +265,18 @@ Embedding: see `include/qjsnapi.h`
 | `src/error.c` | errors and exceptions |
 | `src/builtins.c` | ArrayBuffer, TypedArray, DataView, BigInt, Date, Promise/deferred |
 | `src/buffer.c`, `src/buffer.js` | Buffer APIs and the minimal Buffer class (embedded at build time) |
-| `src/node_api.c` | async context, `napi_make_callback`, callback scopes, `napi_fatal_exception` |
+| `src/node_api.c` | async context, `napi_make_callback`, callback scopes, `napi_fatal_exception`, the frame of loop-originated callbacks |
+| `src/loop.c` | libuv loop ownership, finalizer check/idle handles, drain and close at teardown, `napi_get_uv_event_loop` |
+| `src/async.c` | `napi_async_work` on the libuv thread pool |
+| `src/tsfn.c` | thread-safe functions |
 | `src/loader.c` | `.node` loading: `napi_register_module_v1`, API version, legacy `napi_module_register` |
-| `src/stubs_generated.c` | generated by `tools/gen_stubs.py`, do not edit |
-| `host/main.c`, `host/bootstrap.js` | the `quickjs-napi` executable: event loop, CommonJS loader, timers, `process` (embedded at build time by `cmake/embed.cmake`), `buffer`, `util`, `url`, `vm` |
+| `src/stubs_generated.c` | generated by `tools/gen_stubs.py`, do not edit (empty now: every function is implemented) |
+| `host/main.c`, `host/bootstrap.js` | the `quickjs-napi` executable: libuv event loop (timers, immediates, `beforeExit`), CommonJS loader, `process` (embedded at build time by `cmake/embed.cmake`), `buffer`, `util`, `url`, `vm` |
 | `test/addons`, `test/js` | our test addons; the JS tests also run under Node.js as reference |
 | `test/node` | Node.js conformance tests (vendored, see its README) |
 | `test/unit` | C embedding test (teardown order, scopes, error state, finalizer queue) |
 | `test/lsan.supp` | LeakSanitizer suppressions for leaks the Node.js tests make by design |
+| `cmake/expect_abort.cmake` | runs a Node.js test that must abort (`napi_fatal_error`) and checks its output |
 
 After implementing a function, run `python3 tools/gen_stubs.py` to drop its
 stub; the `stubs_up_to_date` test fails otherwise.
