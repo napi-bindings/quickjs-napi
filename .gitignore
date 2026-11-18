@@ -59,3 +59,17 @@ dkms.conf
 
 # VSCode
 .vscode
+
+# Claude files
+CLAUDE.md
+.claude
+
+# Local tooling
+AGENTS.md
+.agents
+
+# Ignore .githuman
+.githuman
+
+# Ignore cto toolkit files
+.cto-toolkit/
