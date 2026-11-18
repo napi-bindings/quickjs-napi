@@ -53,7 +53,7 @@ jobs:
             exit 1
           fi
           if [ "$EVENT" = release ] && [ "${TAG#v}" != "$version" ]; then
-            echo "::error::the tag $TAG does not match the project version $version (CMakeLists.txt)"
+            echo "::error file=CMakeLists.txt::the tag $TAG does not match the project version $version. Set project(quickjs-napi VERSION ${TAG#v}) in CMakeLists.txt, commit, then recreate the release so that its tag points to that commit."
             exit 1
           fi
           echo "version: $version"

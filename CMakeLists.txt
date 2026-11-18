@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 # The release workflow checks that the tag of a release matches this version.
-project(quickjs-napi VERSION 0.0.1 LANGUAGES C)
+project(quickjs-napi VERSION 0.0.2 LANGUAGES C)
 
 # ------------------------------------------------------------------------------
 # Options
