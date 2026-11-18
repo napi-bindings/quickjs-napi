@@ -9,13 +9,15 @@ configure time.
 - [Options](#options)
 - [Windows](#windows)
 - [What the build produces](#what-the-build-produces)
+- [Installing](#installing)
+- [Release packages](#release-packages)
 - [Continuous integration](#continuous-integration)
 
 ## Prerequisites
 
 | Requirement | Notes |
 |---|---|
-| `quickjs-build` checked out **next to** this repository | `../quickjs-build`, branch `feat/quickjs-2026-06-04`; or point `QJSNAPI_QUICKJS_DIR` at it |
+| `quickjs-build` checked out **next to** this repository | `../quickjs-build`, its latest release (7.0.0: QuickJS 2026-06-04); or point `QJSNAPI_QUICKJS_DIR` at it |
 | CMake and Ninja | |
 | A C17 compiler | gcc or clang on Linux/macOS; zig (`zig cc`) or MSYS2 MinGW on Windows. MSVC is not supported (QuickJS does not build with it) |
 | A C++17 compiler | only for the C++ test addons and the node-addon-api suite |
@@ -72,6 +74,9 @@ assertions.
 | `QJSNAPI_TSAN` | `OFF` | ThreadSanitizer for everything (exclusive with `QJSNAPI_SANITIZE`) |
 | `QJSNAPI_BUILD_TESTS` | `ON` | test addons and the CTest suite |
 | `QJSNAPI_NODE_ADDON_API_TESTS` | `ON` | the node-addon-api suite (8 C++ bindings, about 2 minutes of build) |
+| `QJSNAPI_BUILD_SHARED` | `ON` | also build the shared library (QuickJS and libuv inside); turns on position-independent code for everything |
+| `QJSNAPI_INSTALL_HOST` | `ON` | install the `quickjs-napi` executable |
+| `QJSNAPI_QUICKJS_BUILD_REF` | empty | the quickjs-build tag recorded in `BUILDINFO.txt` (set by the release workflow) |
 
 ## Windows
 
@@ -114,6 +119,7 @@ resolves the `napi_*` imports from the running executable.
 | Target | What it is |
 |---|---|
 | `qjsnapi` | static library: the Node-API implementation and `qjsnapi.h` |
+| `qjsnapi_shared` | shared library `libqjsnapi.so` / `libqjsnapi.dylib` / `qjsnapi.dll`: the same sources plus all of QuickJS and libuv ([embedding.md](embedding.md#from-a-release-package)) |
 | `quickjs-napi` | the executable ([host.md](host.md)); exports every `napi_*` and `uv_*` symbol |
 | `test_embed` | the C embedding test |
 | test addons | `test/addons`, the Node.js conformance addons, the 8 node-addon-api bindings |
@@ -127,9 +133,83 @@ How the executable exports its symbols on each platform (whole archive,
 `--export-dynamic`, `__declspec(dllexport)`, `-undefined dynamic_lookup` for
 addons on macOS) is described in [embedding.md](embedding.md#linking).
 
+On Windows, QuickJS has no export annotations: `cmake/gen_def.cmake` reads
+the symbol index of `libqjs.a` and writes a `.def` file listing its
+`JS_*`, `__JS_*` and `js_*` symbols for `qjsnapi.dll` (the zig linker
+ignores `--export-all-symbols`).
+
+## Installing
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DQJSNAPI_BUILD_TESTS=OFF       -DCMAKE_INSTALL_PREFIX=/opt/quickjs-napi
+cmake --build build
+cmake --install build
+```
+
+| Path | Content |
+|---|---|
+| `bin/` | `quickjs-napi`; `qjsnapi.dll` on Windows |
+| `include/` | `node_api.h`, `node_api_types.h`, `js_native_api.h`, `js_native_api_types.h`, `qjsnapi.h`, `quickjs.h`, `quickjs-libc.h`, `uv.h`, `uv/*.h` |
+| `lib/` | `libqjsnapi.a`, `libqjs.a`, `libuv.a` (three separate archives); `libqjsnapi.so` / `.dylib`; on Windows the import libraries `libqjsnapi.dll.a` (the DLL) and `libquickjs-napi.dll.a` (the executable, for MinGW addons) |
+| `lib/cmake/qjsnapi/` | `find_package(qjsnapi)`, targets in [embedding.md](embedding.md#from-a-release-package) |
+| `share/doc/quickjs-napi/` | `LICENSE`, `licenses/` (QuickJS, quickjs-build, libuv), `BUILDINFO.txt` (version, target, compiler, QuickJS and libuv versions) |
+
+`test/package/smoke.sh <prefix>` checks an installed tree: it builds
+`test/package` with `find_package`, runs the embedding test linked with the
+static archives and with the shared library, a script, and the addons of
+`test/js/test_hello.js` built with the installed headers only.
+
+## Release packages
+
+`.github/workflows/release.yml` runs when a GitHub release is **published**
+(or by hand, `workflow_dispatch`, which does everything but the upload):
+
+1. **prepare**: reads `project(quickjs-napi VERSION x.y.z)` from
+   `CMakeLists.txt` and fails if the release tag (`x.y.z` or `vx.y.z`)
+   differs; picks the latest release of quickjs-build (or the
+   `quickjs_build_ref` input).
+2. **ci**: the whole CI suite (`ci.yml`) on that quickjs-build.
+3. **build**: one package per platform, Release, tests off, installed and
+   zipped as `quickjs-napi-<version>-<platform>.zip` (the layout of
+   [Installing](#installing)).
+4. **smoke**: `test/package/smoke.sh` on each package, on a machine or
+   emulator of its platform.
+5. **publish**: only if everything above passed, uploads the zip files and
+   `SHA256SUMS` to the release.
+
+| Package | Built with | Smoke test |
+|---|---|---|
+| `linux-x86_64` | zig, glibc 2.17 | ubuntu, gcc |
+| `linux-x86` | zig, glibc 2.17 | ubuntu (32-bit), zig |
+| `linux-arm64` | zig, glibc 2.17 | ubuntu arm64, gcc |
+| `linux-armv7` | zig, glibc 2.17 | qemu-user |
+| `linux-riscv64` | zig, glibc 2.27 | qemu-user |
+| `linux-x86_64-musl`, `linux-arm64-musl` | zig, musl | Alpine container, gcc |
+| `windows-x86_64`, `windows-x86` | zig, MinGW-w64 UCRT | windows-latest, zig |
+| `windows-arm64` | zig, MinGW-w64 UCRT | windows-11-arm, zig |
+| `macos-arm64`, `macos-x86_64` | Apple clang, macOS 11+ | native runners |
+| `freebsd-x86_64` | zig | compiled and linked only (no hosted FreeBSD runner) |
+
+**musl.** zig links musl executables statically by default, and a static
+musl executable cannot `dlopen()` addons. The executable is therefore linked
+**dynamically** against the system musl (`/lib/ld-musl-<arch>.so.1`, as on
+Alpine); the libraries are the same as for the other platforms. If a musl
+smoke test fails because of the executable, set `-DQJSNAPI_INSTALL_HOST=OFF`
+for that package in `release.yml`: it then holds the headers and libraries
+only (`find_package` reports `QJSNAPI_HAS_HOST` false), for embedders.
+
+**Not packaged:** WebAssembly (no `dlopen`, and libuv does not support WASI),
+builds with MSVC (QuickJS does not compile with it; MSVC addons still load in
+`quickjs-napi.exe`), Android and iOS.
+
+To release: bump `VERSION` in `CMakeLists.txt`, merge, then publish a
+release whose tag is that version.
+
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+`.github/workflows/ci.yml` runs on every push and pull request, and from the
+release workflow (`workflow_call`). It builds against the latest
+quickjs-build release, or the `quickjs_build_ref` input:
 
 | Job | Preset | Compiler |
 |---|---|---|

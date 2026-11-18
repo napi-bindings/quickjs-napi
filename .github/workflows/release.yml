@@ -1,0 +1,307 @@
+name: Release
+
+# Builds the binary packages of a release and attaches them to it.
+#
+# Every package is a zip archive, quickjs-napi-<version>-<platform>.zip:
+#   bin/      quickjs-napi (+ qjsnapi.dll on Windows)
+#   include/  Node-API headers, qjsnapi.h, quickjs.h, quickjs-libc.h, uv.h
+#   lib/      libqjsnapi.a, libqjs.a, libuv.a, the shared library,
+#             import libraries (Windows), cmake/qjsnapi (find_package)
+#   share/doc/quickjs-napi/  licenses, BUILDINFO.txt
+# See doc/building.md#release-packages.
+#
+# Order: the full CI suite and the package builds run in parallel; every
+# package is then used as a user would (test/package/smoke.sh) on a machine
+# or emulator of its platform; the release gets its assets only when all of
+# that passed. workflow_dispatch runs everything but the upload.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      quickjs_build_ref:
+        description: "quickjs-build tag, branch or commit (default: its latest release)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # The version (checked against the release tag) and the quickjs-build
+  # release to build with.
+  # ----------------------------------------------------------------------------
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      quickjs_build_ref: ${{ steps.quickjs-build.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(sed -n 's/^project(quickjs-napi VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [ -z "$version" ]; then
+            echo "::error file=CMakeLists.txt::project(quickjs-napi VERSION x.y.z) not found"
+            exit 1
+          fi
+          if [ "$EVENT" = release ] && [ "${TAG#v}" != "$version" ]; then
+            echo "::error::the tag $TAG does not match the project version $version (CMakeLists.txt)"
+            exit 1
+          fi
+          echo "version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - id: quickjs-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ inputs.quickjs_build_ref }}
+        run: |
+          ref=$INPUT_REF
+          if [ -z "$ref" ]; then
+            ref=$(gh release view --repo napi-bindings/quickjs-build --json tagName --jq .tagName)
+          fi
+          if [ -z "$ref" ]; then
+            echo "::error::cannot determine the latest quickjs-build release"
+            exit 1
+          fi
+          echo "quickjs-build: $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+  # ----------------------------------------------------------------------------
+  # The whole test suite, on the same quickjs-build.
+  # ----------------------------------------------------------------------------
+  ci:
+    name: CI
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    with:
+      quickjs_build_ref: ${{ needs.prepare.outputs.quickjs_build_ref }}
+
+  # ----------------------------------------------------------------------------
+  # One package per platform. Linux, Windows and FreeBSD are cross-compiled
+  # with `zig cc` from Linux, with the zig targets of quickjs-build (glibc
+  # 2.17, MinGW-w64 UCRT); macOS is built natively with the Xcode SDK.
+  # ----------------------------------------------------------------------------
+  build:
+    name: build ${{ matrix.platform }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, os: ubuntu-24.04, zig: x86_64-linux-gnu.2.17 }
+          - { platform: linux-x86, os: ubuntu-24.04, zig: x86-linux-gnu.2.17 }
+          - { platform: linux-arm64, os: ubuntu-24.04, zig: aarch64-linux-gnu.2.17 }
+          - { platform: linux-armv7, os: ubuntu-24.04, zig: arm-linux-gnueabihf.2.17 }
+          - { platform: linux-riscv64, os: ubuntu-24.04, zig: riscv64-linux-gnu.2.27 }
+          - { platform: linux-x86_64-musl, os: ubuntu-24.04, zig: x86_64-linux-musl }
+          - { platform: linux-arm64-musl, os: ubuntu-24.04, zig: aarch64-linux-musl }
+          - { platform: windows-x86_64, os: ubuntu-24.04, zig: x86_64-windows-gnu }
+          - { platform: windows-x86, os: ubuntu-24.04, zig: x86-windows-gnu }
+          - { platform: windows-arm64, os: ubuntu-24.04, zig: aarch64-windows-gnu }
+          - { platform: freebsd-x86_64, os: ubuntu-24.04, zig: x86_64-freebsd }
+          - { platform: macos-arm64, os: macos-latest, arch: arm64 }
+          - { platform: macos-x86_64, os: macos-15-intel, arch: x86_64 }
+    env:
+      PACKAGE: quickjs-napi-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: quickjs-napi
+      - uses: actions/checkout@v7
+        with:
+          repository: napi-bindings/quickjs-build
+          ref: ${{ needs.prepare.outputs.quickjs_build_ref }}
+          path: quickjs-build
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+      - name: Install Ninja
+        run: python -m pip install ninja
+      - name: Install zig
+        if: matrix.zig
+        run: |
+          python -m pip install "ziglang==$(cat quickjs-build/.zigversion)"
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec "%s" -m ziglang "$@"\n' "$(command -v python)" > "$RUNNER_TEMP/bin/zig"
+          chmod +x "$RUNNER_TEMP/bin/zig"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Configure
+        env:
+          ZIG_TARGET: ${{ matrix.zig }}
+          ARCH: ${{ matrix.arch }}
+          QUICKJS_BUILD_REF: ${{ needs.prepare.outputs.quickjs_build_ref }}
+        run: |
+          set -- -S quickjs-napi -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DQJSNAPI_BUILD_TESTS=OFF \
+            "-DQJSNAPI_QUICKJS_BUILD_REF=$QUICKJS_BUILD_REF" \
+            "-DCMAKE_INSTALL_PREFIX=$PWD/stage/$PACKAGE" -DCMAKE_INSTALL_LIBDIR=lib
+          if [ -n "$ZIG_TARGET" ]; then
+            zig version
+            set -- "$@" "-DCMAKE_TOOLCHAIN_FILE=$PWD/quickjs-build/toolchains/zig.cmake" \
+              "-DZIG_TARGET=$ZIG_TARGET"
+          else
+            # Same minimum as the quickjs-build archives.
+            set -- "$@" "-DCMAKE_OSX_ARCHITECTURES=$ARCH" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          fi
+          cmake "$@"
+      - name: Build
+        run: cmake --build build
+      - name: Package
+        run: |
+          cmake --install build
+          mkdir dist
+          (cd stage && zip -qr -9 "../dist/$PACKAGE.zip" "$PACKAGE")
+          unzip -l "dist/$PACKAGE.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.platform }}
+          path: dist/${{ env.PACKAGE }}.zip
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------------------
+  # Each package used as a user would (test/package/smoke.sh): find_package,
+  # the embedding test linked with the static archives and with the shared
+  # library, a script and addons built with the package headers only.
+  #   cc:        the system compiler (else zig, for the package's target)
+  #   run:       command prefix for the binaries (qemu-user), "skip" = build only
+  #   container: run inside this Docker image (musl: Alpine)
+  # ----------------------------------------------------------------------------
+  smoke:
+    name: smoke ${{ matrix.platform }}
+    needs: [prepare, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, os: ubuntu-24.04, cc: gcc }
+          - { platform: linux-x86, os: ubuntu-24.04, zig: x86-linux-gnu.2.17, packages: libc6-i386 }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm, cc: gcc }
+          - platform: linux-armv7
+            os: ubuntu-24.04
+            zig: arm-linux-gnueabihf.2.17
+            packages: qemu-user libc6-armhf-cross
+            run: qemu-arm -L /usr/arm-linux-gnueabihf
+          - platform: linux-riscv64
+            os: ubuntu-24.04
+            zig: riscv64-linux-gnu.2.27
+            packages: qemu-user libc6-riscv64-cross
+            run: qemu-riscv64 -L /usr/riscv64-linux-gnu
+          - { platform: linux-x86_64-musl, os: ubuntu-24.04, container: "alpine:3.22" }
+          - { platform: linux-arm64-musl, os: ubuntu-24.04-arm, container: "alpine:3.22" }
+          - { platform: windows-x86_64, os: windows-latest, zig: x86_64-windows-gnu }
+          - { platform: windows-x86, os: windows-latest, zig: x86-windows-gnu }
+          - { platform: windows-arm64, os: windows-11-arm, zig: aarch64-windows-gnu }
+          - { platform: macos-arm64, os: macos-latest, cc: cc }
+          - { platform: macos-x86_64, os: macos-15-intel, cc: cc }
+          # No hosted FreeBSD runner: compiled and linked only.
+          - { platform: freebsd-x86_64, os: ubuntu-24.04, zig: x86_64-freebsd, run: skip }
+    defaults:
+      run:
+        shell: bash
+    env:
+      PACKAGE: quickjs-napi-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: quickjs-napi
+      - uses: actions/checkout@v7
+        if: matrix.zig
+        with:
+          repository: napi-bindings/quickjs-build
+          ref: ${{ needs.prepare.outputs.quickjs_build_ref }}
+          path: quickjs-build
+      - uses: actions/download-artifact@v8
+        with:
+          name: package-${{ matrix.platform }}
+          path: dist
+      - name: Unpack
+        run: |
+          mkdir pkg
+          cd pkg
+          if command -v unzip >/dev/null 2>&1; then
+            unzip -q "../dist/$PACKAGE.zip"
+          else
+            cmake -E tar xf "../dist/$PACKAGE.zip"
+          fi
+      - uses: actions/setup-python@v7
+        if: ${{ !matrix.container }}
+        with:
+          python-version: "3.x"
+      - name: Install Ninja
+        if: ${{ !matrix.container }}
+        run: python -m pip install ninja
+      - name: Install zig
+        if: matrix.zig
+        run: |
+          python -m pip install "ziglang==$(cat quickjs-build/.zigversion)"
+          if [ "$RUNNER_OS" = Windows ]; then
+            python -c "import os, ziglang; print(os.path.dirname(ziglang.__file__))" >> "$GITHUB_PATH"
+          else
+            mkdir -p "$RUNNER_TEMP/bin"
+            printf '#!/bin/sh\nexec "%s" -m ziglang "$@"\n' "$(command -v python)" > "$RUNNER_TEMP/bin/zig"
+            chmod +x "$RUNNER_TEMP/bin/zig"
+            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Install the runtime
+        if: matrix.packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+      - name: Smoke test
+        if: ${{ !matrix.container }}
+        env:
+          CC: ${{ matrix.cc }}
+          ZIG_TARGET: ${{ matrix.zig }}
+          RUN: ${{ matrix.run }}
+          BUILD_DIR: ${{ github.workspace }}/package-smoke
+        run: |
+          set --
+          if [ -n "$ZIG_TARGET" ]; then
+            toolchain=$PWD/quickjs-build/toolchains/zig.cmake
+            if [ "$RUNNER_OS" = Windows ]; then toolchain=$(cygpath -m "$toolchain"); fi
+            set -- "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DZIG_TARGET=$ZIG_TARGET"
+          fi
+          sh quickjs-napi/test/package/smoke.sh "pkg/$PACKAGE" "$@"
+      - name: Smoke test (${{ matrix.container }})
+        if: matrix.container
+        env:
+          IMAGE: ${{ matrix.container }}
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w -e PACKAGE "$IMAGE" sh -c '
+            apk add --no-cache build-base cmake samurai >/dev/null &&
+            BUILD_DIR=/w/package-smoke sh quickjs-napi/test/package/smoke.sh "pkg/$PACKAGE"'
+
+  # ----------------------------------------------------------------------------
+  # Attach the packages and their checksums to the release.
+  # ----------------------------------------------------------------------------
+  publish:
+    name: Upload release assets
+    if: github.event_name == 'release'
+    needs: [prepare, ci, build, smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum quickjs-napi-*.zip | tee SHA256SUMS
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/quickjs-napi-*.zip dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber

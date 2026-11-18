@@ -32,6 +32,19 @@
 #include "quickjs.h"
 #include "node_api_types.h"
 
+/* Visibility of the embedding API, as NAPI_EXTERN in js_native_api.h: the
+ * library is compiled with hidden visibility, and the shared library
+ * (libqjsnapi.so / .dylib / qjsnapi.dll) exports these functions through this
+ * annotation. Calls through the import library of qjsnapi.dll need no
+ * __declspec(dllimport). */
+#ifndef QJSNAPI_EXTERN
+#if defined(_WIN32)
+#define QJSNAPI_EXTERN __declspec(dllexport)
+#else
+#define QJSNAPI_EXTERN __attribute__((visibility("default")))
+#endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -42,17 +55,21 @@ struct uv_loop_s;
 /* Creates the Node-API host for `ctx` and stores it as the context opaque
  * pointer, with a libuv loop of its own (closed by qjsnapi_host_destroy).
  * Returns NULL on failure (a JS exception may be pending). */
+QJSNAPI_EXTERN
 qjsnapi_host *qjsnapi_host_create(JSContext *ctx);
 
 /* Same, on the embedder's loop, which must outlive the host. The loop runs
  * on the thread that owns `ctx`. */
+QJSNAPI_EXTERN
 qjsnapi_host *qjsnapi_host_create_with_loop(JSContext *ctx,
                                             struct uv_loop_s *loop);
 
 /* The loop napi_get_uv_event_loop returns. */
+QJSNAPI_EXTERN
 struct uv_loop_s *qjsnapi_host_get_loop(qjsnapi_host *host);
 
 /* Returns the host attached to `ctx`, or NULL. */
+QJSNAPI_EXTERN
 qjsnapi_host *qjsnapi_host_from_context(JSContext *ctx);
 
 /* Tears down every env, as Node.js does at exit, with JavaScript disabled:
@@ -62,6 +79,7 @@ qjsnapi_host *qjsnapi_host_from_context(JSContext *ctx);
  * references and instance data are finalized, the module cache is released
  * and the host is detached from the context. The embedder closes its own
  * handles on the loop first. Must be called before JS_FreeContext(). */
+QJSNAPI_EXTERN
 void qjsnapi_host_destroy(qjsnapi_host *host);
 
 /* Loads a `.node` shared library and runs its Node-API initializer.
@@ -70,11 +88,13 @@ void qjsnapi_host_destroy(qjsnapi_host *host);
  * context. As with Node.js's process.dlopen, every call runs the addon's
  * initializer again with a new env and returns new exports (caching is the
  * module loader's job). */
+QJSNAPI_EXTERN
 int qjsnapi_load_addon(qjsnapi_host *host, const char *path, JSValue *exports);
 
 /* Runs the initializer of an addon linked statically into the embedder, as
  * if it had been loaded from `name`. `module_api_version` follows the
  * node_api_module_get_api_version_v1 semantics (0 selects the default, 8). */
+QJSNAPI_EXTERN
 int qjsnapi_init_static_addon(qjsnapi_host *host, const char *name,
                               napi_addon_register_func init,
                               int32_t module_api_version, JSValue *exports);
@@ -82,14 +102,17 @@ int qjsnapi_init_static_addon(qjsnapi_host *host, const char *name,
 /* The minimal Node.js Buffer constructor used by napi_create_buffer*
  * (Buffer.from, alloc, toString, ...). The library does not install it as a
  * global: the embedder decides where it is visible. Returns a new reference. */
+QJSNAPI_EXTERN
 JSValue qjsnapi_host_get_buffer(qjsnapi_host *host);
 
 /* What napi_get_node_version reports: the Node.js release whose Node-API
  * behaviour is reproduced, with release name "quickjs-napi". A host that
  * provides `process` should report the same (process.version). */
+QJSNAPI_EXTERN
 const napi_node_version *qjsnapi_node_version(void);
 
 /* Highest Node-API version supported by this build. */
+QJSNAPI_EXTERN
 uint32_t qjsnapi_napi_version(void);
 
 /* ---- Finalizers -----------------------------------------------------------
@@ -103,6 +126,7 @@ uint32_t qjsnapi_napi_version(void);
  * JavaScript disabled (napi_cannot_run_js). */
 
 /* Runs the queued finalizers of every env. Returns how many ran. */
+QJSNAPI_EXTERN
 size_t qjsnapi_host_run_finalizers(qjsnapi_host *host);
 
 /* ---- Weak references ------------------------------------------------------
@@ -117,9 +141,11 @@ size_t qjsnapi_host_run_finalizers(qjsnapi_host *host);
  * when the host is destroyed, and when the embedder calls this function. An
  * embedder clears it at the end of each macrotask it runs itself, and before
  * an explicit garbage collection (global.gc()). */
+QJSNAPI_EXTERN
 void qjsnapi_host_clear_kept_objects(qjsnapi_host *host);
 
 /* Non-zero when finalizers are queued: the event loop must not exit yet. */
+QJSNAPI_EXTERN
 int qjsnapi_host_has_pending_finalizers(qjsnapi_host *host);
 
 /* Called with an exception that no JavaScript frame can catch: thrown by a
@@ -128,6 +154,7 @@ int qjsnapi_host_has_pending_finalizers(qjsnapi_host *host);
  * printed on stderr and dropped. */
 typedef void (*qjsnapi_uncaught_fn)(qjsnapi_host *host, JSContext *ctx,
                                     JSValue exception, void *opaque);
+QJSNAPI_EXTERN
 void qjsnapi_host_set_uncaught_handler(qjsnapi_host *host,
                                        qjsnapi_uncaught_fn fn, void *opaque);
 
@@ -139,6 +166,7 @@ void qjsnapi_host_set_uncaught_handler(qjsnapi_host *host,
  * exceptions to the uncaught handler. */
 typedef void (*qjsnapi_checkpoint_fn)(qjsnapi_host *host, JSContext *ctx,
                                       void *opaque);
+QJSNAPI_EXTERN
 void qjsnapi_host_set_checkpoint(qjsnapi_host *host, qjsnapi_checkpoint_fn fn,
                                  void *opaque);
 
@@ -146,6 +174,7 @@ void qjsnapi_host_set_checkpoint(qjsnapi_host *host, qjsnapi_checkpoint_fn fn,
  * an exception thrown by a thread-safe function callback of an addon built
  * for Node-API < 10 becomes a DEP0168 deprecation warning instead of an
  * uncaught exception. */
+QJSNAPI_EXTERN
 void qjsnapi_host_set_force_uncaught_exceptions_policy(qjsnapi_host *host,
                                                        int force);
 

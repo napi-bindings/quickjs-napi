@@ -367,3 +367,48 @@ Node-API function is exported.
 
 Link with `uv_a` (libuv) and the QuickJS library the headers in `include/`
 were taken from.
+
+### From a release package
+
+The [release packages](building.md#release-packages) install a CMake
+package:
+
+```cmake
+find_package(qjsnapi CONFIG REQUIRED)   # CMAKE_PREFIX_PATH=<package dir>
+target_link_libraries(my_app PRIVATE qjsnapi::static)   # or qjsnapi::shared
+```
+
+| Target | What it is |
+|---|---|
+| `qjsnapi::static` | `libqjsnapi.a` + the bundled `libqjs.a` and `libuv.a`, with their system libraries |
+| `qjsnapi::core` | `libqjsnapi.a` alone, to link **your own** QuickJS and libuv |
+| `qjsnapi::quickjs`, `qjsnapi::uv` | the bundled `libqjs.a` and `libuv.a` |
+| `qjsnapi::shared` | the shared library (`libqjsnapi.so`, `libqjsnapi.dylib`, `qjsnapi.dll`) |
+| `qjsnapi::addon` | usage requirements of a `.node` addon for the `quickjs-napi` executable |
+| `qjsnapi::quickjs-napi` | the executable |
+
+`test/package/CMakeLists.txt` uses each of them; it is what the release
+workflow runs on every package.
+
+**Static: three archives.** QuickJS and libuv are separate archives so that
+an embedder can replace them (`qjsnapi::core` plus its own libraries). The
+replacements must be ABI-compatible with the headers of the package: the same
+QuickJS release (`quickjs.h` defines the layout of `JSValue`) and a libuv 1.x
+not older than the bundled one (`BUILDINFO.txt` has both versions). The rules
+of the table above still apply: to load addons, the executable must link
+`libqjsnapi.a` and libuv as whole archives and export their symbols.
+
+**Shared.** The shared library contains QuickJS and libuv and exports
+`napi_*`, `uv_*`, `qjsnapi_*` and the QuickJS API (`JS_*`, `js_*`). Create the
+`JSRuntime` and `JSContext` with the QuickJS **of the library**: do not link
+another QuickJS in the same process (two copies do not share class IDs and
+atoms, and values cannot cross between them). Limits:
+
+- **Windows:** node-gyp addons import Node-API from `node.exe`, and their
+  delay-load hook redirects that to the *executable* of the process, not to
+  `qjsnapi.dll`: they cannot load in a program that uses the DLL. Use the
+  static archives (exporting the symbols from the executable, as above), or
+  `quickjs-napi.exe`. Addons linked against `libqjsnapi.dll.a` instead load
+  normally.
+- **Linux, BSD, macOS:** addons find the symbols in the shared library, which
+  is loaded globally with the executable; nothing else is needed.

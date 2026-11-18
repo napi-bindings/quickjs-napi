@@ -1,0 +1,111 @@
+# CMake package of quickjs-napi @PROJECT_VERSION@ (Node-API on QuickJS).
+#
+#   find_package(qjsnapi CONFIG REQUIRED)
+#
+# Imported targets:
+#   qjsnapi::static        libqjsnapi.a with the bundled QuickJS and libuv
+#   qjsnapi::core          libqjsnapi.a alone, for an embedder that links its
+#                          own QuickJS and libuv: they must be ABI-compatible
+#                          with the bundled quickjs.h and uv.h (see
+#                          BUILDINFO.txt for the versions)
+#   qjsnapi::quickjs       the bundled libqjs.a
+#   qjsnapi::uv            the bundled libuv.a
+#   qjsnapi::shared        the shared library, QuickJS and libuv inside
+#   qjsnapi::addon         usage requirements of a .node addon
+#   qjsnapi::quickjs-napi  the executable
+# qjsnapi::shared and qjsnapi::quickjs-napi exist only when the package has
+# them (QJSNAPI_HAS_SHARED, QJSNAPI_HAS_HOST).
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(_qjsnapi_qjs_libs "@QJSNAPI_PKG_QJS_LIBS@")
+set(_qjsnapi_uv_libs "@QJSNAPI_PKG_UV_LIBS@")
+if("Threads::Threads" IN_LIST _qjsnapi_qjs_libs
+   OR "Threads::Threads" IN_LIST _qjsnapi_uv_libs)
+  find_dependency(Threads)
+endif()
+
+set_and_check(_qjsnapi_include "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+set_and_check(_qjsnapi_lib "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
+
+if(NOT TARGET qjsnapi::core)
+  add_library(qjsnapi::core STATIC IMPORTED)
+  set_target_properties(
+    qjsnapi::core
+    PROPERTIES IMPORTED_LOCATION "${_qjsnapi_lib}/libqjsnapi.a"
+               INTERFACE_INCLUDE_DIRECTORIES "${_qjsnapi_include}"
+               INTERFACE_LINK_LIBRARIES "@QJSNAPI_PKG_CORE_LIBS@")
+
+  add_library(qjsnapi::quickjs STATIC IMPORTED)
+  set_target_properties(
+    qjsnapi::quickjs
+    PROPERTIES IMPORTED_LOCATION "${_qjsnapi_lib}/libqjs.a"
+               INTERFACE_INCLUDE_DIRECTORIES "${_qjsnapi_include}"
+               INTERFACE_LINK_LIBRARIES "${_qjsnapi_qjs_libs}")
+
+  add_library(qjsnapi::uv STATIC IMPORTED)
+  set_target_properties(
+    qjsnapi::uv
+    PROPERTIES IMPORTED_LOCATION "${_qjsnapi_lib}/libuv.a"
+               INTERFACE_INCLUDE_DIRECTORIES "${_qjsnapi_include}"
+               INTERFACE_LINK_LIBRARIES "${_qjsnapi_uv_libs}")
+
+  add_library(qjsnapi::static INTERFACE IMPORTED)
+  set_target_properties(
+    qjsnapi::static
+    PROPERTIES INTERFACE_LINK_LIBRARIES
+               "qjsnapi::core;qjsnapi::quickjs;qjsnapi::uv")
+
+  set(QJSNAPI_HAS_SHARED @QJSNAPI_PKG_SHARED@)
+  if(QJSNAPI_HAS_SHARED)
+    add_library(qjsnapi::shared SHARED IMPORTED)
+    set_target_properties(
+      qjsnapi::shared
+      PROPERTIES IMPORTED_LOCATION
+                 "${PACKAGE_PREFIX_DIR}/@QJSNAPI_PKG_SHARED_FILE@"
+                 INTERFACE_INCLUDE_DIRECTORIES "${_qjsnapi_include}")
+    if(WIN32)
+      set_target_properties(
+        qjsnapi::shared
+        PROPERTIES IMPORTED_IMPLIB
+                   "${PACKAGE_PREFIX_DIR}/@QJSNAPI_PKG_SHARED_IMPLIB@")
+    endif()
+  endif()
+
+  set(QJSNAPI_HAS_HOST @QJSNAPI_PKG_HOST@)
+  if(QJSNAPI_HAS_HOST)
+    add_executable(qjsnapi::quickjs-napi IMPORTED)
+    set_target_properties(
+      qjsnapi::quickjs-napi
+      PROPERTIES IMPORTED_LOCATION
+                 "${PACKAGE_PREFIX_DIR}/@QJSNAPI_PKG_HOST_FILE@")
+  endif()
+
+  # An addon is built like node-gyp builds it: Node-API headers only, the
+  # napi_* and uv_* symbols are resolved from the process that loads it.
+  add_library(qjsnapi::addon INTERFACE IMPORTED)
+  set_target_properties(
+    qjsnapi::addon
+    PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${_qjsnapi_include}"
+               INTERFACE_COMPILE_DEFINITIONS BUILDING_NODE_EXTENSION)
+  if(WIN32 AND QJSNAPI_HAS_HOST)
+    # Imports from quickjs-napi.exe, through its import library.
+    set_target_properties(
+      qjsnapi::addon
+      PROPERTIES INTERFACE_LINK_LIBRARIES
+                 "${PACKAGE_PREFIX_DIR}/@QJSNAPI_PKG_HOST_IMPLIB@")
+  elseif(APPLE)
+    set_target_properties(
+      qjsnapi::addon PROPERTIES INTERFACE_LINK_OPTIONS
+                                "LINKER:-undefined,dynamic_lookup")
+  endif()
+endif()
+
+unset(_qjsnapi_qjs_libs)
+unset(_qjsnapi_uv_libs)
+unset(_qjsnapi_include)
+unset(_qjsnapi_lib)
+
+check_required_components(qjsnapi)
