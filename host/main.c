@@ -60,6 +60,8 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
 #else
 #include <limits.h>
@@ -877,6 +879,21 @@ static int parse_options(int argc, char **argv, int *force_policy) {
 }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+  /* As in Node.js, "\n" is written as is: in the CRT's default text mode it
+   * would become "\r\n", which a parent reading the pipe would see. Without a
+   * stream (fd < 0, e.g. started without a stdout) there is nothing to set; a
+   * failure on a valid stream is reported, but output still works. */
+  {
+    FILE *streams[2] = {stdout, stderr};
+    for (int k = 0; k < 2; k++) {
+      int fd = _fileno(streams[k]);
+      if (fd >= 0 && _setmode(fd, _O_BINARY) == -1)
+        fprintf(stderr, "quickjs-napi: cannot set binary mode on fd %d: %s\n",
+                fd, strerror(errno));
+    }
+  }
+#endif
   int force_policy = 0;
   int script = parse_options(argc, argv, &force_policy);
   if (script < 0) return 9; /* Node.js: invalid command-line option */
