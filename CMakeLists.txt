@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(quickjs-napi LANGUAGES C)
+# The release workflow checks that the tag of a release matches this version.
+project(quickjs-napi VERSION 0.0.1 LANGUAGES C)
 
 # ------------------------------------------------------------------------------
 # Options
@@ -12,6 +13,19 @@ option(QJSNAPI_TSAN
 option(QJSNAPI_BUILD_TESTS "Build the test addons and the test suite" ON)
 option(QJSNAPI_NODE_ADDON_API_TESTS
        "Build and run the node-addon-api test suite (C++, 8 bindings)" ON)
+option(QJSNAPI_BUILD_SHARED
+       "Also build libqjsnapi as a shared library, QuickJS and libuv included"
+       ON)
+# Recorded in BUILDINFO.txt of the installed tree (set by the release workflow).
+set(QJSNAPI_QUICKJS_BUILD_REF
+    ""
+    CACHE STRING "Tag or commit of quickjs-build, for BUILDINFO.txt")
+
+# The shared library contains QuickJS and libuv: every object must be
+# position-independent, theirs included.
+if(QJSNAPI_BUILD_SHARED)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 set(QJSNAPI_QUICKJS_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../quickjs-build"
@@ -68,10 +82,11 @@ include(FetchContent)
 set(LIBUV_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(LIBUV_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LIBUV_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+set(QJSNAPI_LIBUV_TAG v1.51.0)
 FetchContent_Declare(
   libuv
   GIT_REPOSITORY https://github.com/libuv/libuv.git
-  GIT_TAG v1.51.0
+  GIT_TAG ${QJSNAPI_LIBUV_TAG}
   GIT_SHALLOW TRUE)
 if(POLICY CMP0169)
   cmake_policy(SET CMP0169 OLD) # FetchContent_Populate, for EXCLUDE_FROM_ALL
@@ -243,6 +258,201 @@ if(WIN32 AND NOT MSVC)
   # static libgcc / libwinpthread, as for the quickjs-build tools
   target_link_options(quickjs-napi PRIVATE -static)
 endif()
+# zig links musl executables statically by default, and a static musl
+# executable cannot dlopen(): it could not load any addon. -dynamic links
+# against the system's musl (/lib/ld-musl-<arch>.so.1, as on Alpine).
+if(DEFINED ZIG_TARGET AND ZIG_TARGET MATCHES "-musl")
+  target_link_options(quickjs-napi PRIVATE -dynamic)
+endif()
+
+# ------------------------------------------------------------------------------
+# Shared library: libqjsnapi.so / libqjsnapi.dylib / qjsnapi.dll
+# ------------------------------------------------------------------------------
+# The same sources as the static library, linked with all of QuickJS and libuv
+# (whole archive). An embedder must create its JSRuntime and JSContext with
+# the QuickJS inside it: two copies of QuickJS in one process do not share
+# their class IDs and atoms. So the library exports, besides napi_*, uv_* and
+# qjsnapi_*, the QuickJS API (JS_*):
+#   - Linux/BSD/macOS: QuickJS is compiled with default visibility, libuv and
+#     our functions mark their API visible (UV_EXTERN, NAPI_EXTERN,
+#     QJSNAPI_EXTERN); everything else of ours is hidden.
+#   - Windows: napi_*, uv_* and qjsnapi_* carry __declspec(dllexport);
+#     QuickJS has no export annotation, so a .def file lists the JS_*, __JS_*
+#     and js_* symbols defined by libqjs.a, read from its symbol index
+#     (cmake/gen_def.cmake).
+#     zig's linker ignores --export-all-symbols.
+if(QJSNAPI_BUILD_SHARED)
+  set(_qjsnapi_def)
+  if(WIN32)
+    set(_qjsnapi_def "${QJSNAPI_GENERATED_DIR}/qjsnapi_quickjs.def")
+    set(_qjsnapi_strip OFF)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+      set(_qjsnapi_strip ON) # x86: C names are decorated with "_"
+    endif()
+    add_custom_command(
+      OUTPUT "${_qjsnapi_def}"
+      COMMAND "${CMAKE_COMMAND}" "-DLIB=$<TARGET_FILE:qjs>"
+              "-DSTRIP_UNDERSCORE=${_qjsnapi_strip}"
+              "-DOUTPUT=${_qjsnapi_def}"
+              # __JS_*: called by the inline functions of quickjs.h
+              "-DREGEX=^(__)?(JS|js)_[A-Za-z0-9_]+$" -P
+              "${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_def.cmake"
+      DEPENDS "$<TARGET_FILE:qjs>" cmake/gen_def.cmake
+      COMMENT "Listing the QuickJS API exported by qjsnapi.dll"
+      VERBATIM)
+  endif()
+  add_library(qjsnapi_shared SHARED ${QJSNAPI_SOURCES}
+                                    "${QJSNAPI_GENERATED_DIR}/buffer_js.h"
+                                    ${_qjsnapi_def})
+  set_target_properties(
+    qjsnapi_shared
+    PROPERTIES OUTPUT_NAME qjsnapi
+               C_STANDARD 17
+               C_STANDARD_REQUIRED ON
+               C_VISIBILITY_PRESET hidden)
+  target_compile_definitions(qjsnapi_shared PRIVATE NAPI_VERSION=10)
+  target_include_directories(
+    qjsnapi_shared PUBLIC include PRIVATE src "${QJSNAPI_GENERATED_DIR}")
+  target_link_libraries(
+    qjsnapi_shared PRIVATE "$<LINK_LIBRARY:QJSNAPI_WHOLE_ARCHIVE,qjs,uv_a>"
+                           ${CMAKE_DL_LIBS})
+  if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(qjsnapi_shared PRIVATE -Wall -Wextra
+                                                  -Wno-unused-parameter
+                                                  -Wmissing-prototypes)
+  endif()
+  if(WIN32 AND NOT MSVC)
+    # qjsnapi.dll and libqjsnapi.dll.a, next to the static libqjsnapi.a
+    set_target_properties(qjsnapi_shared PROPERTIES PREFIX "")
+  endif()
+endif()
+
+# ------------------------------------------------------------------------------
+# Installation (the layout of the release packages, see doc/building.md)
+# ------------------------------------------------------------------------------
+#   bin/      quickjs-napi, qjsnapi.dll (Windows)
+#   include/  the Node-API headers, qjsnapi.h, quickjs.h, quickjs-libc.h, uv.h
+#   lib/      libqjsnapi.a, libqjs.a, libuv.a: three archives, so that an
+#             embedder can link its own compatible QuickJS or libuv instead;
+#             the shared library; the import libraries (Windows)
+#   lib/cmake/qjsnapi/          find_package(qjsnapi)
+#   share/doc/quickjs-napi/     licenses and BUILDINFO.txt
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+option(QJSNAPI_INSTALL_HOST "Install the quickjs-napi executable" ON)
+
+if(QJSNAPI_INSTALL_HOST)
+  # ARCHIVE: libquickjs-napi.dll.a on Windows, the import library that
+  # addons built with MinGW link against (the test addons do the same).
+  install(TARGETS quickjs-napi RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+                               ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+install(TARGETS qjsnapi ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+if(QJSNAPI_BUILD_SHARED)
+  install(TARGETS qjsnapi_shared RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+                                 LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                                 ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+install(FILES "$<TARGET_FILE:qjs>" DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RENAME libqjs.a)
+install(FILES "$<TARGET_FILE:uv_a>" DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RENAME libuv.a)
+
+install(
+  FILES include/js_native_api.h
+        include/js_native_api_types.h
+        include/node_api.h
+        include/node_api_types.h
+        include/qjsnapi.h
+        include/quickjs.h
+        include/quickjs-libc.h
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+# uv.h is part of the addon API (node-gyp puts it on the include path too).
+install(DIRECTORY "${libuv_SOURCE_DIR}/include/"
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Licenses: ours, QuickJS (MIT), quickjs-build (Apache-2.0), libuv (MIT and
+# the licenses of the code it includes).
+install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
+set(_qjsnapi_licenses "${libuv_SOURCE_DIR}/LICENSE" libuv.txt
+                      "${libuv_SOURCE_DIR}/LICENSE-extra" libuv-extra.txt)
+if(EXISTS "${QJSNAPI_QUICKJS_DIR}/LICENSE.quickjs")
+  list(APPEND _qjsnapi_licenses "${QJSNAPI_QUICKJS_DIR}/LICENSE.quickjs"
+       QuickJS.txt "${QJSNAPI_QUICKJS_DIR}/LICENSE" quickjs-build.txt)
+endif()
+while(_qjsnapi_licenses)
+  list(POP_FRONT _qjsnapi_licenses _src _name)
+  install(FILES "${_src}" DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses
+          RENAME ${_name})
+endwhile()
+
+# What the package was built from.
+if(DEFINED ZIG_TARGET)
+  set(_qjsnapi_target "${ZIG_TARGET}")
+else()
+  set(_qjsnapi_target "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+set(_qjsnapi_quickjs "prebuilt ${QJSNAPI_QUICKJS_LIBRARY}")
+if(EXISTS "${QJSNAPI_QUICKJS_DIR}/VERSION")
+  file(STRINGS "${QJSNAPI_QUICKJS_DIR}/VERSION" _qjsnapi_quickjs LIMIT_COUNT 1)
+endif()
+if(QJSNAPI_QUICKJS_BUILD_REF)
+  string(APPEND _qjsnapi_quickjs " (quickjs-build ${QJSNAPI_QUICKJS_BUILD_REF})")
+endif()
+file(
+  WRITE "${CMAKE_CURRENT_BINARY_DIR}/BUILDINFO.txt"
+  "quickjs-napi ${PROJECT_VERSION}\n"
+  "Node-API:   10 (Node.js 22 behaviour)\n"
+  "Target:     ${_qjsnapi_target}\n"
+  "Compiler:   ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}\n"
+  "Build type: ${CMAKE_BUILD_TYPE}\n"
+  "QuickJS:    ${_qjsnapi_quickjs}\n"
+  "libuv:      ${QJSNAPI_LIBUV_TAG}\n")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/BUILDINFO.txt"
+        DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+# find_package(qjsnapi): the system libraries of each archive, as linked here.
+function(qjsnapi_plain_link_libraries target out)
+  get_target_property(_libs ${target} INTERFACE_LINK_LIBRARIES)
+  set(_plain)
+  foreach(_lib IN LISTS _libs)
+    if(_lib MATCHES "^\\$<LINK_ONLY:(.+)>$")
+      set(_lib "${CMAKE_MATCH_1}")
+    endif()
+    if(_lib AND NOT _lib MATCHES "\\$<")
+      list(APPEND _plain "${_lib}")
+    endif()
+  endforeach()
+  set(${out} "${_plain}" PARENT_SCOPE)
+endfunction()
+qjsnapi_plain_link_libraries(qjs QJSNAPI_PKG_QJS_LIBS)
+qjsnapi_plain_link_libraries(uv_a QJSNAPI_PKG_UV_LIBS)
+set(QJSNAPI_PKG_CORE_LIBS "${CMAKE_DL_LIBS}")
+set(QJSNAPI_PKG_HOST ${QJSNAPI_INSTALL_HOST})
+set(QJSNAPI_PKG_SHARED ${QJSNAPI_BUILD_SHARED})
+if(WIN32)
+  set(QJSNAPI_PKG_SHARED_FILE "${CMAKE_INSTALL_BINDIR}/qjsnapi.dll")
+  set(QJSNAPI_PKG_SHARED_IMPLIB "${CMAKE_INSTALL_LIBDIR}/libqjsnapi.dll.a")
+  set(QJSNAPI_PKG_HOST_IMPLIB "${CMAKE_INSTALL_LIBDIR}/libquickjs-napi.dll.a")
+elseif(APPLE)
+  set(QJSNAPI_PKG_SHARED_FILE "${CMAKE_INSTALL_LIBDIR}/libqjsnapi.dylib")
+else()
+  set(QJSNAPI_PKG_SHARED_FILE "${CMAKE_INSTALL_LIBDIR}/libqjsnapi.so")
+endif()
+set(QJSNAPI_PKG_HOST_FILE
+    "${CMAKE_INSTALL_BINDIR}/quickjs-napi${CMAKE_EXECUTABLE_SUFFIX}")
+set(QJSNAPI_CMAKE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/qjsnapi")
+configure_package_config_file(
+  cmake/qjsnapiConfig.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/qjsnapiConfig.cmake"
+  INSTALL_DESTINATION ${QJSNAPI_CMAKE_DIR}
+  PATH_VARS CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_BINDIR)
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/qjsnapiConfigVersion.cmake"
+  COMPATIBILITY SameMinorVersion)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/qjsnapiConfig.cmake"
+              "${CMAKE_CURRENT_BINARY_DIR}/qjsnapiConfigVersion.cmake"
+        DESTINATION ${QJSNAPI_CMAKE_DIR})
 
 # ------------------------------------------------------------------------------
 # Tests

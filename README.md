@@ -69,7 +69,7 @@ Details: [building](doc/building.md), [the executable](doc/host.md).
 | ↳ [Node.js-specific](doc/node-api/node-specific.md) | Buffer, async context, `napi_make_callback`, callback scopes, `napi_fatal_exception` |
 | ↳ [Asynchronous APIs](doc/node-api/async.md) | async work, thread-safe functions, `napi_get_uv_event_loop` |
 | [The executable](doc/host.md) | command line, `NODE_OPTIONS`, CommonJS modules, globals, builtin modules, `child_process`, event loop, exit |
-| [Building](doc/building.md) | prerequisites, presets, options, Windows (zig, MSYS2), build outputs, CI |
+| [Building](doc/building.md) | prerequisites, presets, options, Windows (zig, MSYS2), build outputs, installing, release packages, CI |
 | [Testing](doc/testing.md) | test suites, Node.js parity, sanitizers, tools, development workflows |
 | [Compatibility](doc/compatibility.md) | every known difference from Node.js 22 |
 
@@ -105,6 +105,7 @@ Test-suite specific notes: [test/node/README.md](test/node/README.md)
 | `test/node` | Node.js conformance tests (vendored) |
 | `test/node-addon-api` | node-addon-api headers and test suite (vendored by `tools/sync_node_addon_api.py`); `harness/` is ours |
 | `test/unit` | C embedding test (teardown order, scopes, error state, finalizer queue) |
+| `test/package` | checks an installed / released package (`smoke.sh`, used by the release workflow) |
 | `test/lsan.supp` | LeakSanitizer suppressions for leaks the Node.js and node-addon-api tests make by design |
 | `cmake/node_addon_api_tests.cmake` | builds the 8 node-addon-api test bindings, one CTest per test module |
 | `cmake/expect_abort.cmake` | runs a Node.js test that must abort (`napi_fatal_error`) and checks its output |
