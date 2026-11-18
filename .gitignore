@@ -52,7 +52,8 @@ Mkfile.old
 dkms.conf
 
 # CMake folders and files
-*build*
+# Directories only: a file such as doc/building.md must not be ignored.
+*build*/
 
 # JetBrains IDE
 .idea
