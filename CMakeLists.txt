@@ -10,6 +10,8 @@ option(QJSNAPI_SANITIZE
 option(QJSNAPI_TSAN
        "Build everything (QuickJS and libuv included) with ThreadSanitizer" OFF)
 option(QJSNAPI_BUILD_TESTS "Build the test addons and the test suite" ON)
+option(QJSNAPI_NODE_ADDON_API_TESTS
+       "Build and run the node-addon-api test suite (C++, 8 bindings)" ON)
 
 set(QJSNAPI_QUICKJS_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../quickjs-build"
@@ -228,7 +230,7 @@ else()
 endif()
 set(CMAKE_C_LINK_LIBRARY_USING_QJSNAPI_WHOLE_ARCHIVE_SUPPORTED TRUE)
 
-add_executable(quickjs-napi host/main.c
+add_executable(quickjs-napi host/main.c host/spawn.c
                             "${QJSNAPI_GENERATED_DIR}/bootstrap_js.h")
 target_include_directories(quickjs-napi PRIVATE "${QJSNAPI_GENERATED_DIR}")
 set_target_properties(quickjs-napi PROPERTIES C_STANDARD 17 ENABLE_EXPORTS ON)
@@ -423,6 +425,10 @@ if(QJSNAPI_BUILD_TESTS)
   include("${QJSNAPI_NODE_TESTS_SRC}/js-native-api/tests.cmake")
   include("${QJSNAPI_NODE_TESTS_SRC}/node-api/tests.cmake")
 
+  if(QJSNAPI_NODE_ADDON_API_TESTS)
+    include(cmake/node_addon_api_tests.cmake)
+  endif()
+
   add_test(NAME js_values
            COMMAND quickjs-napi
                    "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_values.js"
@@ -435,6 +441,10 @@ if(QJSNAPI_BUILD_TESTS)
            COMMAND quickjs-napi
                    "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_node_api.js"
                    "${QJSNAPI_ADDON_DIR}")
+  # Host features of the executable (child_process, -e, -r, NODE_OPTIONS).
+  add_test(NAME js_host
+           COMMAND quickjs-napi "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_host.js")
+  set_tests_properties(js_host PROPERTIES PASS_REGULAR_EXPRESSION "^ok")
 
   add_executable(test_embed test/unit/test_embed.c)
   set_target_properties(test_embed PROPERTIES C_STANDARD 17)
@@ -453,6 +463,12 @@ if(QJSNAPI_BUILD_TESTS)
                        "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_${_t}.js"
                        "${QJSNAPI_ADDON_DIR}")
     endforeach()
+    add_test(NAME node_parity_host
+             COMMAND "${QJSNAPI_NODE}"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/test/js/test_host.js")
+    # The NODE_OPTIONS of the environment must not reach Node.js itself.
+    set_tests_properties(node_parity_host PROPERTIES
+                         PASS_REGULAR_EXPRESSION "^ok" ENVIRONMENT "NODE_OPTIONS=")
   endif()
 
   find_package(Python3 COMPONENTS Interpreter)

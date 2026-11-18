@@ -214,7 +214,15 @@
 
   const process = {
     argv: natives.argv,
-    env: {},
+    env: (() => {
+      const env = {};
+      for (const kv of natives.environ) {
+        // "=C:=C:\\dir" entries (Windows drive cwds) have an empty name.
+        const i = kv.indexOf('=', 1);
+        if (i > 0) env[kv.slice(0, i)] = kv.slice(i + 1);
+      }
+      return env;
+    })(),
     platform: natives.platform,
     execPath: natives.execPath,
     // Same as napi_get_node_version: the Node.js release whose Node-API
@@ -602,7 +610,213 @@
   };
   builtins.module.builtinModules.push('buffer', 'util', 'url', 'vm');
 
+  // ------------------------------------------------------- child_process
+  // spawnSync and spawn (no shell: exec/execSync are not provided), on
+  // natives.spawnSync / natives.spawn (host/spawn.c). stdio: 'pipe',
+  // 'inherit', 'ignore' (a string or an array of three); an asynchronous
+  // child's stdin is never a pipe.
+  class Emitter {
+    constructor() { this._events = Object.create(null); }
+    on(event, fn) {
+      (this._events[event] || (this._events[event] = [])).push(fn);
+      return this;
+    }
+    once(event, fn) {
+      const wrapped = (...args) => {
+        this.removeListener(event, wrapped);
+        fn.apply(this, args);
+      };
+      wrapped.listener = fn;
+      return this.on(event, wrapped);
+    }
+    removeListener(event, fn) {
+      const l = this._events[event];
+      if (l) {
+        const i = l.findIndex((f) => f === fn || f.listener === fn);
+        if (i >= 0) l.splice(i, 1);
+      }
+      return this;
+    }
+    emit(event, ...args) {
+      const l = this._events[event];
+      if (!l || l.length === 0) {
+        if (event === 'error') throw args[0];
+        return false;
+      }
+      for (const fn of l.slice()) fn.apply(this, args);
+      return true;
+    }
+  }
+  Emitter.prototype.addListener = Emitter.prototype.on;
+  Emitter.prototype.off = Emitter.prototype.removeListener;
+
+  function stdioModes(stdio) {
+    if (stdio === undefined) return ['pipe', 'pipe', 'pipe'];
+    if (typeof stdio === 'string') return [stdio, stdio, stdio];
+    return [0, 1, 2].map((i) => {
+      const m = stdio[i];
+      return m === undefined || m === null ? 'pipe' : m;
+    });
+  }
+
+  function envList(env) {
+    if (env === undefined || env === null) return undefined;
+    return Object.keys(env).filter((k) => env[k] !== undefined)
+      .map((k) => `${k}=${env[k]}`);
+  }
+
+  function spawnArgs(file, args, options) {
+    if (typeof file !== 'string') {
+      const e = new TypeError('The "file" argument must be of type string');
+      e.code = 'ERR_INVALID_ARG_TYPE';
+      throw e;
+    }
+    if (!Array.isArray(args)) {
+      options = args;
+      args = [];
+    }
+    options = options || {};
+    return {
+      args: args.map(String),
+      options,
+      native: {
+        env: envList(options.env),
+        cwd: options.cwd,
+        stdio: stdioModes(options.stdio),
+      },
+    };
+  }
+
+  function spawnError(code, syscall, file, args) {
+    const e = new Error(`${syscall} ${file} ${code}`);
+    e.code = code;
+    e.errno = code;
+    e.syscall = `${syscall} ${file}`;
+    e.path = file;
+    e.spawnargs = args;
+    return e;
+  }
+
+  function spawnSync(file, args, options) {
+    const a = spawnArgs(file, args, options);
+    const o = a.options;
+    const input = o.input;
+    if (input !== undefined) {
+      a.native.input = typeof input === 'string'
+        ? natives.Buffer.from(input, o.encoding || 'utf8').buffer
+        : ArrayBuffer.isView(input)
+          ? input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength)
+          : input;
+    }
+    if (o.timeout) a.native.timeout = o.timeout;
+    if (o.killSignal !== undefined) a.native.killSignal = o.killSignal;
+    const r = natives.spawnSync(file, a.args, a.native);
+    const conv = (ab) => {
+      if (ab === null) return null;
+      const b = natives.Buffer.from(ab);
+      return o.encoding && o.encoding !== 'buffer' ? b.toString(o.encoding) : b;
+    };
+    const stdout = conv(r.stdout);
+    const stderr = conv(r.stderr);
+    const result = {
+      pid: r.pid,
+      output: [null, stdout, stderr],
+      stdout,
+      stderr,
+      status: r.status,
+      signal: r.signal,
+    };
+    if (r.error) result.error = spawnError(r.error, 'spawnSync', file, a.args);
+    return result;
+  }
+
+  class Readable extends Emitter {
+    constructor() {
+      super();
+      this._encoding = null;
+    }
+    setEncoding(enc) {
+      this._encoding = enc;
+      return this;
+    }
+    _push(ab) {
+      const b = natives.Buffer.from(ab);
+      this.emit('data', this._encoding ? b.toString(this._encoding) : b);
+    }
+  }
+
+  class ChildProcess extends Emitter {
+    constructor() {
+      super();
+      this.pid = undefined;
+      this.exitCode = null;
+      this.signalCode = null;
+      this.killed = false;
+      this.stdin = null;
+      this.stdout = null;
+      this.stderr = null;
+      this._handle = null;
+    }
+    kill(signal) {
+      if (!this._handle) return false;
+      const ok = this._handle.kill(signal === undefined ? 'SIGTERM' : signal);
+      if (ok) this.killed = true;
+      return ok;
+    }
+  }
+
+  function spawn(file, args, options) {
+    const a = spawnArgs(file, args, options);
+    const child = new ChildProcess();
+    child.spawnfile = file;
+    child.spawnargs = [file, ...a.args];
+    const modes = a.native.stdio;
+    if (modes[1] === 'pipe') child.stdout = new Readable();
+    if (modes[2] === 'pipe') child.stderr = new Readable();
+    const onEvent = (type, x, y) => {
+      if (type === 'stdout') {
+        child.stdout._push(x);
+      } else if (type === 'stderr') {
+        child.stderr._push(x);
+      } else if (type === 'exit') {
+        child.exitCode = x;
+        child.signalCode = y;
+        child.emit('exit', x, y);
+      } else if (type === 'close') {
+        if (child.stdout) child.stdout.emit('end');
+        if (child.stderr) child.stderr.emit('end');
+        child._handle = null;
+        child.emit('close', x, y);
+      }
+    };
+    try {
+      child._handle = natives.spawn(file, a.args, a.native, onEvent);
+      child.pid = child._handle.pid;
+    } catch (e) {
+      if (!e.code) throw e;
+      const err = spawnError(e.code, 'spawn', file, a.args);
+      process.nextTick(() => {
+        child.emit('error', err);
+        child.emit('close', -2, null);
+      });
+    }
+    return child;
+  }
+
+  builtins.child_process = { spawnSync, spawn, ChildProcess };
+  builtins.events = Emitter;
+  Emitter.EventEmitter = Emitter;
+  builtins.module.builtinModules.push('child_process', 'events');
+
+  // -r / --require (command line, NODE_OPTIONS): loaded before the main
+  // module, relative to the current directory.
+  function runPreloads() {
+    const req = makeRequire(new Module(resolvePath(natives.cwd(), '[preload]'), null));
+    for (const p of natives.preloads) req(p.startsWith('.') ? resolvePath(natives.cwd(), p) : p);
+  }
+
   function runMain(path) {
+    runPreloads();
     const real = tryFile(resolvePath(natives.cwd(), path));
     if (!real) throw notFound(path, null);
     mainModule = new Module(real, null);
@@ -612,12 +826,23 @@
     mainModule.loaded = true;
   }
 
+  // -e / --eval: the code runs as a module of the current directory, with
+  // process.argv = [execPath, args...] (no script).
+  function runEval(code) {
+    runPreloads();
+    const filename = resolvePath(natives.cwd(), '[eval]');
+    mainModule = new Module(filename, null);
+    mainModule.id = '[eval]';
+    compileAndRun(mainModule, code);
+    mainModule.loaded = true;
+  }
+
   function emitBeforeExit() {
     process.emit('beforeExit', process.exitCode | 0);
   }
 
   return {
-    runMain, emitExit, emitBeforeExit, runDueTimer, immediateCount,
+    runMain, runEval, emitExit, emitBeforeExit, runDueTimer, immediateCount,
     runImmediate, fatalException, unhandledRejection,
   };
 })

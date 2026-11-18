@@ -105,6 +105,20 @@ uint32_t qjsnapi_napi_version(void);
 /* Runs the queued finalizers of every env. Returns how many ran. */
 size_t qjsnapi_host_run_finalizers(qjsnapi_host *host);
 
+/* ---- Weak references ------------------------------------------------------
+ *
+ * V8 keeps the target of a weak handle alive until a garbage collection
+ * finds it unreachable; QuickJS frees an object as soon as its refcount drops
+ * to zero. Addons rely on V8's behaviour (node-addon-api: Napi::Weak of an
+ * object created in the same call). So when a reference becomes weak (count
+ * 0) its target is also put on a "kept objects" list, like the [[KeptAlive]]
+ * list of ECMAScript WeakRefs, and stays alive until the list is cleared:
+ * at every checkpoint of the library (after a callback from the event loop),
+ * when the host is destroyed, and when the embedder calls this function. An
+ * embedder clears it at the end of each macrotask it runs itself, and before
+ * an explicit garbage collection (global.gc()). */
+void qjsnapi_host_clear_kept_objects(qjsnapi_host *host);
+
 /* Non-zero when finalizers are queued: the event loop must not exit yet. */
 int qjsnapi_host_has_pending_finalizers(qjsnapi_host *host);
 

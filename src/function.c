@@ -329,6 +329,41 @@ NAPI_EXTERN napi_status NAPI_CDECL napi_new_instance(napi_env env,
  * one with a receiver not created by the class throws "Illegal invocation".
  * Here such a call reaches the native callback, which must validate `this`
  * (napi_unwrap fails on foreign objects). */
+/* The key of a property descriptor, JS_ATOM_NULL when it has none or the
+ * name is invalid (qn_define_property then reports the error). */
+static JSAtom descriptor_key(JSContext *ctx, const napi_property_descriptor *p) {
+  if (p->utf8name != NULL) return JS_NewAtom(ctx, p->utf8name);
+  if (p->name == NULL) return JS_ATOM_NULL;
+  JSValueConst name = qn_value(p->name);
+  if (!JS_IsString(name) && !JS_IsSymbol(name)) return JS_ATOM_NULL;
+  return JS_ValueToAtom(ctx, name);
+}
+
+/* Whether a later instance (non-static) descriptor has the same key as
+ * properties[i]. */
+static bool instance_key_redefined(JSContext *ctx,
+                                   const napi_property_descriptor *properties,
+                                   size_t count, size_t i) {
+  JSAtom key = descriptor_key(ctx, &properties[i]);
+  if (key == JS_ATOM_NULL) {
+    if (JS_HasException(ctx)) JS_FreeValue(ctx, JS_GetException(ctx));
+    return false;
+  }
+  bool found = false;
+  for (size_t j = i + 1; j < count && !found; j++) {
+    if (properties[j].attributes & napi_static) continue;
+    JSAtom other = descriptor_key(ctx, &properties[j]);
+    if (other == JS_ATOM_NULL) {
+      if (JS_HasException(ctx)) JS_FreeValue(ctx, JS_GetException(ctx));
+      continue;
+    }
+    found = other == key;
+    JS_FreeAtom(ctx, other);
+  }
+  JS_FreeAtom(ctx, key);
+  return found;
+}
+
 NAPI_EXTERN napi_status NAPI_CDECL
 napi_define_class(napi_env env, const char *utf8name, size_t length,
                   napi_callback constructor, void *data,
@@ -361,6 +396,13 @@ napi_define_class(napi_env env, const char *utf8name, size_t length,
       static_count++;
       continue;
     }
+    /* V8 adds instance properties to the prototype template, where a later
+     * definition of the same key replaces an earlier one whatever its
+     * attributes (node-addon-api's objectwrap test defines a symbol-keyed
+     * non-configurable accessor twice). Static properties are defined on the
+     * function like napi_define_properties, where such a redefinition
+     * fails, in Node.js too. */
+    if (instance_key_redefined(ctx, properties, property_count, i)) continue;
     napi_status st = qn_define_property(env, proto, p);
     if (st != napi_ok) {
       JS_FreeValue(ctx, proto);

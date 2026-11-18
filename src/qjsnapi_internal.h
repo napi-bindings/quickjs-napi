@@ -213,6 +213,10 @@ struct qjsnapi_host {
   uint32_t live_tsfns;            /* thread-safe functions not finalized */
   uint32_t running_async_cleanup; /* async cleanup hooks started, not removed */
   bool destroying;
+  /* Targets of references that became weak, held strongly until the next
+   * qjsnapi_host_clear_kept_objects (lifetime.c). */
+  JSValue *kept;
+  size_t kept_len, kept_cap;
 };
 
 /* Per-target side record of the lifetime machinery, stored as the opaque of
@@ -289,7 +293,7 @@ struct napi_env__ {
   qn_list async_contexts;
   /* napi_async_work queued and not completed (cancelled at teardown). */
   qn_list works;       /* napi_async_work items not deleted yet */
-  qn_list orphan_refs; /* user references finalized at teardown */
+  qn_list orphan_refs; /* finalized user references, not deleted yet */
   uint32_t open_callback_scopes;
   bool destructing;
 };
