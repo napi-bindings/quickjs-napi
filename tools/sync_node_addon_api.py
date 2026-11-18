@@ -224,7 +224,10 @@ def sync():
             lines.append("qjsnapi_naa_test(%s)" % m)
     with open(os.path.join(DEST, "tests.cmake"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-    with open(os.path.join(DEST, "VERSION"), "w", encoding="utf-8") as f:
+    # Not "VERSION": DEST is on the include path, and on case-insensitive
+    # file systems (macOS, Windows) it would shadow the C++ <version> header.
+    with open(os.path.join(DEST, "NODE_ADDON_API_VERSION"), "w",
+              encoding="utf-8") as f:
         f.write(version + "\n")
     print("node-addon-api %s: %d test modules, %d skipped, %d patches"
           % (version, len(modules) - len(SKIPPED), len(SKIPPED), len(patches)))

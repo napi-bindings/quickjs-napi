@@ -2,7 +2,7 @@
 
 `test/node-addon-api` holds the headers (`napi.h`, `napi-inl.h`,
 `napi-inl.deprecated.h`), the license and the `test/` directory of
-node-addon-api (version in `VERSION`), copied by
+node-addon-api (version in `NODE_ADDON_API_VERSION`), copied by
 
 ```sh
 python3 tools/sync_node_addon_api.py <node-addon-api checkout>
